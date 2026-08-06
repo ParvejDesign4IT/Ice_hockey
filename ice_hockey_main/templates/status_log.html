@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Status Logs</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        h1 { text-align: center; }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        table, th, td { border: 1px solid #dddddd; }
+        th, td { padding: 8px; text-align: center; }
+        th { background-color: #f2f2f2; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+
+        .back-button, .videoTrim-button {
+            position: absolute;
+            padding: 10px 20px;
+            background-color: #007BFF;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            text-decoration: none;
+        }
+        .back-button:hover, .videoTrim-button:hover {
+            background-color: #0056b3;
+        }
+        .back-button { top: 20px; right: 20px; }
+        .videoTrim-button { top: 20px; right: 140px; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>Status Logs</h1>
+
+        <a href="{% url 'trim_video' %}" class="videoTrim-button">Trim your game</a>
+        <a href="/" class="back-button">Back</a>
+
+        <table id="statusTable">
+            <thead>
+                <tr>
+                    <th>Device UID</th>
+                    <th>Status Of Ground</th>
+                    <th>Timestamp</th>
+                </tr>
+            </thead>
+            <tbody id="statusBody">
+                <!-- Filled by JavaScript -->
+            </tbody>
+        </table>
+    </div>
+
+<script>
+function pollTransmitterData() {
+    fetch('/transmitter-data/').catch(() => {});
+}
+
+function updateStatusLogs() {
+    fetch('/status-logs/json/')
+        .then(res => res.json())
+        .then(data => {
+            const tbody = document.getElementById('statusBody');
+            tbody.innerHTML = "";
+
+            //  TAKE ONLY FIRST 250 (already sorted DESC)
+            data.status_logs.slice(0, 250).forEach(log => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${log.deviceUID}</td>
+                    <td style="font-weight:bold; color:${log.status === 'In' ? 'green' : 'red'};">
+                        ${log.status}
+                    </td>
+                    <td>${log.timestamp}</td>
+                `;
+                tbody.appendChild(row);
+            });
+        });
+}
+
+// Immediate load
+pollTransmitterData();
+updateStatusLogs();
+
+// Refresh every 1 sec
+setInterval(() => {
+    pollTransmitterData();
+    updateStatusLogs();
+}, 1000);
+</script>
+
+
+</body>
+</html>

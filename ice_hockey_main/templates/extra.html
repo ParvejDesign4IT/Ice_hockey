@@ -1,0 +1,338 @@
+act as experienced and read he prompt first 
+ update function as if device is data['status'] == 'Active' and d > 1000 , so in the status log 
+change the status to "In" bcoz player is in the ground and "Out" if player is out of the ground means data['status'] == 'Active' and d < 1000 
+"
+# Global cache to store last known values
+DEVICE_CACHE = {}
+
+def transmitter_data_json(request):
+    """
+    Returns JSON data for all devices with latest readings,
+    computed IN/OUT, Active/Inactive status,
+    and logs IN/OUT status into StatusLog.
+    """
+
+    # --- Get latest read per deviceUID ---
+    latest_subquery = Read.objects.filter(
+        deviceUID=OuterRef('deviceUID')
+    ).order_by('-timeStampUTC').values('id')[:1]
+
+    recent_reads = Read.objects.filter(
+        id__in=Subquery(latest_subquery)
+    ).select_related('transmitter')
+
+    server_utc_now = now()
+
+    # --- Update DEVICE_CACHE ---
+    for read in recent_reads:
+        device_uid = read.deviceUID
+
+        if device_uid not in DEVICE_CACHE:
+            DEVICE_CACHE[device_uid] = {
+                'deviceUID': device_uid,
+                'distance1': None,
+                'distance2': None,
+                'distance3': None,
+                'position': None,
+                'timeStampUTC': None,
+                'lastTimeStamp': None,
+                'status': 'Inactive',          # UI only
+                'inout_status': 'Unknown',     # Stored in DB
+                'distance1_last_update': None,
+                'distance2_last_update': None,
+                'distance3_last_update': None,
+            }
+
+        transmitter_serial = (
+            read.transmitter.transmitterSerialNumber
+            if read.transmitter else None
+        )
+
+        if transmitter_serial == '1000CB' and read.distance1 is not None:
+            DEVICE_CACHE[device_uid]['distance1'] = read.distance1
+            DEVICE_CACHE[device_uid]['distance1_last_update'] = read.timeStampUTC
+
+        elif transmitter_serial == '1000DF' and read.distance2 is not None:
+            DEVICE_CACHE[device_uid]['distance2'] = read.distance2
+            DEVICE_CACHE[device_uid]['distance2_last_update'] = read.timeStampUTC
+
+        elif transmitter_serial == '10012B' and read.distance3 is not None:
+            DEVICE_CACHE[device_uid]['distance3'] = read.distance3
+            DEVICE_CACHE[device_uid]['distance3_last_update'] = read.timeStampUTC
+
+        DEVICE_CACHE[device_uid]['timeStampUTC'] = (
+            read.timeStampUTC.astimezone(dt_timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            if read.timeStampUTC else None
+        )
+
+        DEVICE_CACHE[device_uid]['lastTimeStamp'] = (
+            read.lastTimeStamp.astimezone(dt_timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            if read.lastTimeStamp else None
+        )
+
+    # --- STATUS + IN/OUT + STATUS LOG ---
+    for device_uid, data in DEVICE_CACHE.items():
+
+        # ---------- ACTIVE / INACTIVE (UI ONLY) ----------
+        last_updates = [
+            data['distance1_last_update'],
+            data['distance2_last_update'],
+            data['distance3_last_update'],
+        ]
+
+        data['status'] = (
+            'Active'
+            if any(ts and (server_utc_now - ts <= timedelta(seconds=20)) for ts in last_updates)
+            else 'Inactive'
+        )
+
+        # ---------- IN / OUT LOGIC ----------
+        distances = [data['distance1'], data['distance2'], data['distance3']]
+        valid_distances = [d for d in distances if isinstance(d, (int, float))]
+
+        old_inout_status = data.get('inout_status', 'Unknown')
+        new_inout_status = 'Out'  # default
+
+        #  FORCE OUT WHEN INACTIVE
+        if data['status'] == 'Inactive':
+            new_inout_status = 'Out'
+           
+        else:
+            if valid_distances:
+                if any(d > 1000 for d in valid_distances) and data['status'] == 'Active' :
+                    new_inout_status = 'Out'
+                   
+                elif all(d < 1000 for d in valid_distances) and data['status'] == 'Active':
+                    new_inout_status = 'In'
+                    
+                    
+        data['inout_status'] = new_inout_status
+
+        # ---------- STATUS LOG (STORE INOUT ONLY) ----------
+        if old_inout_status != new_inout_status:
+            last_log = StatusLog.objects.filter(
+                deviceUID=device_uid
+            ).order_by('-timestamp').first()
+
+            if not last_log or last_log.status != new_inout_status:
+                StatusLog.objects.create(
+                    deviceUID=device_uid,
+                    status=new_inout_status,
+                    timestamp=server_utc_now
+                )
+
+    # --- Remove stale devices ---
+    stale_threshold = timedelta(minutes=30)
+    stale_devices = [
+        uid for uid, data in DEVICE_CACHE.items()
+        if data['lastTimeStamp'] and (server_utc_now - now() > stale_threshold)
+    ]
+    for uid in stale_devices:
+        DEVICE_CACHE.pop(uid, None)
+
+    # --- Response ---
+    aggregated_reads = list(DEVICE_CACHE.values())
+    return JsonResponse({
+        'reads': aggregated_reads,
+        'timestamp': server_utc_now.isoformat(),
+        'count': len(aggregated_reads)
+    })
+
+"
+
+act as experienced django developer and modify the code as per the instruction below:
+read the prompt correct andd then apply the changes only as mentioned in the prompt
+dont touch any functionality, and only add belwo changes
+when distance greater than 1000 and data['status'] == 'Active' then in the status log change the status to "In"
+when distance less than 1000 and data['status'] == 'Active' then in the status log change the status to "Out"
+belwo is views.py
+"DEVICE_CACHE = {}
+
+def transmitter_data_json(request):
+    """
+    Returns JSON data for all devices with latest readings,
+    computed IN/OUT, Active/Inactive status, trilateration coordinates,
+    and server UTC timestamp.
+    """
+    # --- Get latest read per deviceUID ---
+    latest_subquery = Read.objects.filter(
+        deviceUID=OuterRef('deviceUID')
+    ).order_by('-timeStampUTC').values('id')[:1]
+
+    recent_reads = Read.objects.filter(
+        id__in=Subquery(latest_subquery)
+    ).select_related('transmitter')
+
+    server_utc_now = now()  # Server UTC time for all operations
+
+    # --- Update DEVICE_CACHE with new readings ---
+    for read in recent_reads:
+        device_uid = read.deviceUID
+
+        if device_uid not in DEVICE_CACHE:
+            DEVICE_CACHE[device_uid] = {
+                'deviceUID': device_uid,
+                'distance1': None,
+                'distance2': None,
+                'distance3': None,
+                'position': None,
+                'timeStampUTC': None,
+                'lastTimeStamp': None,
+                'status': 'Inactive',          # Active / Inactive
+                'inout_status': 'Unknown',     # In / Out
+                'distance1_last_update': None,
+                'distance2_last_update': None,
+                'distance3_last_update': None,
+            }
+
+        transmitter_serial = read.transmitter.transmitterSerialNumber if read.transmitter else None
+
+        # Update only the transmitter that posted
+        if transmitter_serial == '1000CB' and read.distance1 is not None:
+            DEVICE_CACHE[device_uid]['distance1'] = read.distance1
+            DEVICE_CACHE[device_uid]['distance1_last_update'] = read.timeStampUTC
+
+        elif transmitter_serial == '1000DF' and read.distance2 is not None:
+            DEVICE_CACHE[device_uid]['distance2'] = read.distance2
+            DEVICE_CACHE[device_uid]['distance2_last_update'] = read.timeStampUTC
+
+        elif transmitter_serial == '10012B' and read.distance3 is not None:
+            DEVICE_CACHE[device_uid]['distance3'] = read.distance3
+            DEVICE_CACHE[device_uid]['distance3_last_update'] = read.timeStampUTC
+
+        # --- Fix timezone.utc error here ---
+        DEVICE_CACHE[device_uid]['timeStampUTC'] = (
+            read.timeStampUTC.astimezone(dt_timezone.utc).strftime('%Y-%m-%d %H:%M:%S') 
+            if read.timeStampUTC else None
+        )
+
+        DEVICE_CACHE[device_uid]['lastTimeStamp'] = (
+            read.lastTimeStamp.astimezone(dt_timezone.utc).strftime('%Y-%m-%d %H:%M:%S') 
+            if read.lastTimeStamp else None
+        )
+
+    # --- Status + In/Out + Trilateration + StatusLog ---
+    for device_uid, data in DEVICE_CACHE.items():
+        # --- IN/OUT Logic ---
+        distances = [data['distance1'], data['distance2'], data['distance3']]
+        valid_distances = [d for d in distances if d is not None and isinstance(d, (int, float))]
+        if valid_distances:
+            if any(d < 1000 for d in valid_distances):
+                data['inout_status'] = 'In'
+            elif all(d > 500 for d in valid_distances):
+                data['inout_status'] = 'Out'
+
+        # --- ACTIVE/INACTIVE Logic ---
+        last_updates = [
+            data['distance1_last_update'],
+            data['distance2_last_update'],
+            data['distance3_last_update'],
+        ]
+        # --- ACTIVE / INACTIVE STATUS ---
+        new_status = 'Active' if any(
+            ts and (server_utc_now - ts <= timedelta(seconds=20))
+            for ts in last_updates
+        ) else 'Inactive'
+
+        old_status = data.get('status')
+
+        # Update cache
+        data['status'] = new_status
+
+        # --- STATUS LOG (NO DUPLICATES, ONLY ON CHANGE) ---
+        if old_status != new_status:
+            last_log = StatusLog.objects.filter(
+                deviceUID=device_uid
+            ).order_by('-timestamp').first()
+
+            # avoid duplicate consecutive logs
+            if not last_log or last_log.status != new_status:
+                StatusLog.objects.create(
+                    deviceUID=device_uid,
+                    status=new_status,
+                    timestamp=server_utc_now
+                )
+                
+        
+
+    # --- Optionally remove devices that haven't reported in a long time ---
+    stale_threshold = timedelta(minutes=30)
+    stale_devices = [
+        uid for uid, data in DEVICE_CACHE.items()
+        if data['lastTimeStamp'] and (server_utc_now - now() > stale_threshold)
+    ]
+    for uid in stale_devices:
+        DEVICE_CACHE.pop(uid, None)
+
+    # --- Return JSON Response ---
+    aggregated_reads = list(DEVICE_CACHE.values())
+    return JsonResponse({
+        'reads': aggregated_reads,
+        'timestamp': server_utc_now.isoformat(),
+        'count': len(aggregated_reads)
+    })
+"
+below is models.py
+"from django.db import models
+from django.utils import timezone
+
+
+class Transmitter(models.Model):
+    transmitterSerialNumber = models.CharField(max_length=20)
+    nodeType = models.CharField(max_length=20)
+    nodeSerialNumber = models.CharField(max_length=20, null=True, blank=True)
+    allCount = models.IntegerField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['transmitterSerialNumber']),
+        ]
+
+class Read(models.Model):
+    transmitter = models.ForeignKey(Transmitter, related_name='reads', on_delete=models.CASCADE)
+    timeStampUTC = models.DateTimeField(auto_now_add=True)
+    lastTimeStamp = models.DateTimeField(null=True)
+    deviceUID = models.CharField(max_length=20)
+    manufacturerName = models.CharField(max_length=100)
+    distance1 = models.IntegerField(null=True, blank=True)
+    distance2 = models.IntegerField(null=True, blank=True)
+    distance3 = models.IntegerField(null=True, blank=True)
+    count = models.IntegerField(null=True, blank=True)
+    status = models.CharField(max_length=10, default='Out')
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['deviceUID']),
+            models.Index(fields=['timeStampUTC']),
+            models.Index(fields=['deviceUID', 'timeStampUTC']),
+        ]
+
+
+
+class StatusLog(models.Model):
+    deviceUID = models.CharField(max_length=255)
+    status = models.CharField(max_length=10)
+    timestamp = models.DateTimeField()
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['deviceUID']),
+            models.Index(fields=['timestamp']),
+        ]
+
+    def __str__(self):
+        return f"{self.deviceUID} - {self.status} at {self.timestamp}"
+
+
+
+class CommonVideo(models.Model):
+    video_file = models.FileField(upload_to='videos/')
+    log_date = models.DateField(default=timezone.now)
+    def __str__(self):
+        return f"Common Video - {self.video_file.name}"
+
+
+
+
+
+"

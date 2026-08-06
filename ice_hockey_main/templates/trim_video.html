@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trim Video</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f9f9f9;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+
+        .form-container {
+            background-color: #fff;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0px 4px 15px rgba(0, 0, 0, 0.1);
+            max-width: 400px;
+            width: 100%;
+            margin: 20px;
+        }
+
+        label {
+            display: block;
+            margin-top: 10px;
+            font-weight: bold;
+            color: #555;
+        }
+
+        select, input[type="text"], input[type="date"] {
+            width: 100%;
+            padding: 10px;
+            margin-top: 5px;
+            margin-bottom: 15px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+
+        input[type="submit"] {
+            background-color: #007BFF;
+            color: white;
+            padding: 10px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            width: 100%;
+        }
+
+        /* Availability message */
+        .availability {
+            padding: 12px;
+            border-radius: 5px;
+            text-align: center;
+            font-weight: bold;
+            margin-bottom: 15px;
+            display: none;
+        }
+
+        .available {
+            background-color: #e6ffe6;
+            color: #2e7d32;
+        }
+
+        .not-available {
+            background-color: #ffe6e6;
+            color: #d8000c;
+        }
+
+        .download-button {
+            display: block;
+            width: 100%;
+            text-align: center;
+            padding: 12px;
+            margin-top: 15px;
+            background-color: #28a745;
+            color: white;
+            border-radius: 5px;
+            text-decoration: none;
+        }
+
+        .back-button {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            padding: 10px 30px;
+            background-color: #007BFF;
+            color: white;
+            border-radius: 5px;
+            text-decoration: none;
+        }
+
+        .upload-button {
+            position: absolute;
+            top: 20px;
+            right: 120px;
+            padding: 10px 30px;
+            background-color: #007BFF;
+            color: white;
+            border-radius: 5px;
+            text-decoration: none;
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="form-container">
+    <h1>Trim Video</h1>
+    
+    <!-- Error message display -->
+    {% if error_message %}
+        <div class="error">{{ error_message }}</div>
+    {% endif %}
+    
+    <!-- Video availability message (AJAX) -->
+    <div id="videoAvailability" class="availability" style="display: none;"></div>
+    
+    <form method="post">
+        {% csrf_token %}
+        
+        <label>Select Device UID:</label>
+        <select name="device_uid" required>
+            <option value="">-- Select a Device UID --</option>
+            {% for device in distinct_device_count %}
+                <option value="{{ device.deviceUID }}" {% if device.deviceUID == selected_device_uid %}selected{% endif %}>
+                    {{ device.deviceUID }}
+                </option>
+            {% endfor %}
+        </select>
+        
+        <label>Select Date:</label>
+        <input type="date" name="log_date" id="log_date" required>
+        
+        <label>Game Start Time (HH:MM:SS):</label>
+        <input type="text" name="game_start_time" value="00:00:00" required pattern="^([01]\d|2[0-3]):([0-5]\d):([0-5]\d)$" title="Format: HH:MM:SS">
+        
+        <input type="submit" value="Trim Video">
+    </form>
+    
+    {% if success_message %}
+    <div class="availability available" style="display:block;">
+         {{ success_message }}
+    </div>
+    {% endif %}
+
+    {% if download_url %}
+        <a href="{{ download_url }}" class="download-button" download>
+            ⬇ Download Trimmed Video
+        </a>
+    {% endif %}
+
+    <a href="/status-logs" class="back-button">Back</a>
+    <a href="/upload-video" class="upload-button">Upload your game</a>
+</div>
+
+<!-- Trimming Progress Popup -->
+<div id="trimOverlay" style="
+    display:none;
+    position:fixed;
+    top:0; left:0;
+    width:100%; height:100%;
+    background:rgba(0,0,0,0.5);
+    z-index:9999;
+    justify-content:center;
+    align-items:center;
+">
+    <div style="
+        background:#fff;
+        padding:30px 40px;
+        border-radius:8px;
+        text-align:center;
+        box-shadow:0 4px 15px rgba(0,0,0,0.3);
+    ">
+        <h3>✂ Trimming video...</h3>
+        <p>Please wait, this may take some time.</p>
+    </div>
+</div>
+
+
+<!-- JS: Check video availability on date/device select -->
+<script>
+
+    const dateInput = document.getElementById("log_date");
+    const deviceSelect = document.querySelector("select[name='device_uid']");
+    const logMsgBox = document.getElementById("videoAvailability");
+    
+    const trimForm = document.querySelector("form");
+    const overlay = document.getElementById("trimOverlay");
+
+    trimForm.addEventListener("submit", () => {
+        overlay.style.display = "flex";
+    });
+
+
+    function checkStatusLogs() {
+        const selectedDate = dateInput.value;
+        const deviceUID = deviceSelect.value;
+        
+        if (!selectedDate || !deviceUID) {
+            logMsgBox.style.display = "none";
+            return;
+        }
+        
+        fetch(`/check-statuslog/?device_uid=${deviceUID}&date=${selectedDate}`)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                logMsgBox.style.display = "block";
+                if (data.available) {
+                    logMsgBox.className = "availability available";
+                    logMsgBox.innerText = ` ${data.message}`;
+                } else {
+                    logMsgBox.className = "availability not-available";
+                    logMsgBox.innerText = ` ${data.message}`;
+                }
+            })
+            .catch(error => {
+                console.error('Fetch error:', error);
+                logMsgBox.style.display = "block";
+                logMsgBox.className = "availability not-available";
+                logMsgBox.innerText = " Error checking availability: " + error.message;
+            });
+    }
+    
+    // Trigger on change
+    dateInput.addEventListener("change", checkStatusLogs);
+    deviceSelect.addEventListener("change", checkStatusLogs);
+</script>
+
+</body>
+</html>
