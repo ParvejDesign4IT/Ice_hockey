@@ -1,29 +1,35 @@
-from django.http import HttpResponse
-from moviepy import concatenate_videoclips
-from rest_framework import status
-from .models import Read, StatusLog
-from rest_framework import status
-from rest_framework.decorators import api_view
-from rest_framework.decorators import api_view
-from .models import Transmitter
-from .serializers import TransmitterSerializer
-from django.shortcuts import render
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
-from rest_framework import status
-from django.shortcuts import render, redirect, HttpResponseRedirect
+import os
 import math
 import json
-from datetime import timedelta
-from django.utils.timezone import now
-from django.contrib import messages
-from django.shortcuts import render
+import subprocess
+from datetime import datetime, timedelta, timezone as dt_timezone, time
+
 from django.conf import settings
+from django.contrib import messages
+from django.http import HttpResponse, JsonResponse, HttpResponseRedirect
+from django.shortcuts import render, redirect
+from django.utils import timezone
+from django.utils.timezone import now
+from django.views.decorators.csrf import csrf_exempt
+
+from rest_framework import status
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+
+from django.db.models import Subquery, OuterRef
+
 from moviepy.video.io.VideoFileClip import VideoFileClip
-from .models import StatusLog, CommonVideo, DeviceLabel  # <-- added DeviceLabel
-import os
+
+from .models import Read, StatusLog, Transmitter, CommonVideo, DeviceLabel
+from .serializers import TransmitterSerializer
 
 
+DEVICE_CACHE = {}
+
+
+# ---------------------------------------------------------------------------
+# Transmitter ingest
+# ---------------------------------------------------------------------------
 
 @api_view(['POST'])
 def create_transmitter(request):
@@ -31,7 +37,6 @@ def create_transmitter(request):
         try:
             data = json.loads(request.body)
 
-            # Print the posted data to the terminal
             print("Received POST data:", data)
             print("------------------------------------------------------------------------------------------------------------------------------------")
             transmitter_serial_number = data.get('transmitterSerialNumber', '')
@@ -44,9 +49,8 @@ def create_transmitter(request):
 
             if serializer.is_valid():
                 serializer.save()
-
                 return Response(serializer.data,
-                                status=status.HTTP_200_OK if existing_transmitter else status.HTTP_201_CREATED)
+                                 status=status.HTTP_200_OK if existing_transmitter else status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         except Exception as e:
@@ -56,23 +60,23 @@ def create_transmitter(request):
     return Response({'message': 'Method not allowed'}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
 
-# views.py
-import math
-from django.shortcuts import render
-from django.utils.timezone import now
-from datetime import timedelta
-from .models import Read, Transmitter, StatusLog
-from django.db.models import Max, Subquery, OuterRef
+# ---------------------------------------------------------------------------
+# Shared helper — used by both transmitter_list and transmitter_data_json
+# ---------------------------------------------------------------------------
 
-import math
-from django.shortcuts import render
-from django.utils.timezone import now
-from datetime import timedelta
-from .models import Read, Transmitter, StatusLog
-from django.db.models import Subquery, OuterRef
+def _sort_key(label):
+    """Numeric-aware sort: '2' before '10'; numbers before non-numeric labels."""
+    label_str = str(label)
+    return (0, int(label_str)) if label_str.isdigit() else (1, label_str)
 
 
-def transmitter_list(request):
+def get_aggregated_device_data():
+    """
+    Latest reading per device, with friendly label attached and a
+    basic In/Out 'status' computed from distance thresholds.
+    Sorted ascending by Player No / label.
+    Shared by transmitter_list (page load) and transmitter_data_json (polling).
+    """
     latest_subquery = Read.objects.filter(
         deviceUID=OuterRef('deviceUID')
     ).order_by('-timeStampUTC').values('id')[:1]
@@ -81,8 +85,6 @@ def transmitter_list(request):
         id__in=Subquery(latest_subquery)
     ).select_related('transmitter')
 
-    # NEW: build a quick lookup dict {deviceUID: label} in ONE query,
-    # instead of hitting the DB per-row.
     label_map = dict(DeviceLabel.objects.values_list('deviceUID', 'label'))
 
     device_data = {}
@@ -93,9 +95,6 @@ def transmitter_list(request):
         if device_uid not in device_data:
             device_data[device_uid] = {
                 'deviceUID': device_uid,
-                # NEW: friendly label for display. Falls back to the
-                # raw deviceUID if no mapping exists yet, so nothing
-                # ever shows blank.
                 'label': label_map.get(device_uid, device_uid),
                 'distance1': None,
                 'distance2': None,
@@ -104,11 +103,13 @@ def transmitter_list(request):
                 'timeStampUTC': read.timeStampUTC,
                 'lastTimeStamp': read.lastTimeStamp,
                 'status': read.status,
+                'inout_status': 'Unknown',
                 'distance1_last_update': None,
                 'distance2_last_update': None,
                 'distance3_last_update': None,
-                'distance4_last_update': None,
             }
+        else:
+            device_data[device_uid]['label'] = label_map.get(device_uid, device_uid)
 
         transmitter_serial = read.transmitter.transmitterSerialNumber if read.transmitter else None
 
@@ -122,14 +123,11 @@ def transmitter_list(request):
             device_data[device_uid]['distance3'] = read.distance3 or device_data[device_uid]['distance3']
             device_data[device_uid]['distance3_last_update'] = read.timeStampUTC
 
-        # Update last timestamp
         device_data[device_uid]['lastTimeStamp'] = read.lastTimeStamp
 
-        # Update the latest timeStampUTC
         if read.timeStampUTC > device_data[device_uid]['timeStampUTC']:
             device_data[device_uid]['timeStampUTC'] = read.timeStampUTC
 
-        #  Status based only on distances > 1000
         distances = [
             device_data[device_uid]['distance1'],
             device_data[device_uid]['distance2'],
@@ -140,151 +138,113 @@ def transmitter_list(request):
         else:
             device_data[device_uid]['status'] = 'In'
 
-    aggregated_reads = list(device_data.values())
+    return sorted(device_data.values(), key=lambda d: _sort_key(d['label']))
+
+
+# ---------------------------------------------------------------------------
+# Page views
+# ---------------------------------------------------------------------------
+
+def transmitter_list(request):
+    aggregated_reads = get_aggregated_device_data()
     return render(request, 'ViewPage.html', {'aggregated_reads': aggregated_reads})
 
 
 def status_log_view(request):
-    status_logs = StatusLog.objects.all()  # Adjust this query based on your needs
+    status_logs = StatusLog.objects.all()
     return render(request, 'status_log.html', {'status_logs': status_logs})
 
 
-import math
-from datetime import timedelta, timezone as dt_timezone
-from django.utils.timezone import now
-from django.http import JsonResponse
-from django.db.models import OuterRef, Subquery
-from .models import Read, StatusLog
-
-DEVICE_CACHE = {}
-
+# ---------------------------------------------------------------------------
+# Polling / JSON endpoints
+# ---------------------------------------------------------------------------
 
 def transmitter_data_json(request):
     """
-    Returns JSON data for all devices with latest readings,
-    computed IN/OUT, Active/Inactive status, trilateration coordinates,
-    friendly display label, and server UTC timestamp.
+    Returns JSON for all devices: latest readings, computed IN/OUT,
+    Active/Inactive status, friendly label, server UTC timestamp.
+    Uses DEVICE_CACHE to persist state (e.g. Active/Inactive) between polls.
     """
-    # --- Get latest read per deviceUID ---
-    latest_subquery = Read.objects.filter(
-        deviceUID=OuterRef('deviceUID')
-    ).order_by('-timeStampUTC').values('id')[:1]
-
-    recent_reads = Read.objects.filter(
-        id__in=Subquery(latest_subquery)
-    ).select_related('transmitter')
-
+    aggregated_reads = get_aggregated_device_data()
     server_utc_now = now()
 
-    # NEW: one query for all label mappings, reused below.
-    label_map = dict(DeviceLabel.objects.values_list('deviceUID', 'label'))
-
-    # --- Update DEVICE_CACHE with new readings ---
-    for read in recent_reads:
-        device_uid = read.deviceUID
+    for read in aggregated_reads:
+        device_uid = read['deviceUID']
 
         if device_uid not in DEVICE_CACHE:
             DEVICE_CACHE[device_uid] = {
                 'deviceUID': device_uid,
-                'label': label_map.get(device_uid, device_uid),  # NEW
+                'label': read['label'],
                 'distance1': None,
                 'distance2': None,
                 'distance3': None,
                 'position': None,
                 'timeStampUTC': None,
                 'lastTimeStamp': None,
-                'status': 'Inactive',          # UI status
-                'inout_status': 'Unknown',     # UI In/Out
+                'status': 'Inactive',
+                'inout_status': 'Unknown',
                 'distance1_last_update': None,
                 'distance2_last_update': None,
                 'distance3_last_update': None,
             }
-        else:
-            # NEW: keep label fresh in case a mapping was added/edited
-            # after this device was first cached.
-            DEVICE_CACHE[device_uid]['label'] = label_map.get(device_uid, device_uid)
 
-        transmitter_serial = (
-            read.transmitter.transmitterSerialNumber
-            if read.transmitter else None
+        cache_entry = DEVICE_CACHE[device_uid]
+        cache_entry['label'] = read['label']
+
+        if read['distance1'] is not None:
+            cache_entry['distance1'] = read['distance1']
+            cache_entry['distance1_last_update'] = read['distance1_last_update']
+        if read['distance2'] is not None:
+            cache_entry['distance2'] = read['distance2']
+            cache_entry['distance2_last_update'] = read['distance2_last_update']
+        if read['distance3'] is not None:
+            cache_entry['distance3'] = read['distance3']
+            cache_entry['distance3_last_update'] = read['distance3_last_update']
+
+        cache_entry['timeStampUTC'] = (
+            read['timeStampUTC'].astimezone(dt_timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            if read['timeStampUTC'] else None
+        )
+        cache_entry['lastTimeStamp'] = (
+            read['lastTimeStamp'].astimezone(dt_timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            if read['lastTimeStamp'] else None
         )
 
-        if transmitter_serial == '1000CB' and read.distance1 is not None:
-            DEVICE_CACHE[device_uid]['distance1'] = read.distance1
-            DEVICE_CACHE[device_uid]['distance1_last_update'] = read.timeStampUTC
-
-        elif transmitter_serial == '1000ED' and read.distance2 is not None:
-            DEVICE_CACHE[device_uid]['distance2'] = read.distance2
-            DEVICE_CACHE[device_uid]['distance2_last_update'] = read.timeStampUTC
-
-        elif transmitter_serial == '10012B' and read.distance3 is not None:
-            DEVICE_CACHE[device_uid]['distance3'] = read.distance3
-            DEVICE_CACHE[device_uid]['distance3_last_update'] = read.timeStampUTC
-
-        DEVICE_CACHE[device_uid]['timeStampUTC'] = (
-            read.timeStampUTC.astimezone(dt_timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-            if read.timeStampUTC else None
-        )
-
-        DEVICE_CACHE[device_uid]['lastTimeStamp'] = (
-            read.lastTimeStamp.astimezone(dt_timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-            if read.lastTimeStamp else None
-        )
-
-    # --- Status + In/Out + StatusLog ---
+    # --- Status + In/Out + StatusLog (stateful — stays in this view) ---
     for device_uid, data in DEVICE_CACHE.items():
-
-        # --- IN/OUT (UI logic – unchanged) ---
         distances = [data['distance1'], data['distance2'], data['distance3']]
-        valid_distances = [
-            d for d in distances if d is not None and isinstance(d, (int, float))
-        ]
+        valid_distances = [d for d in distances if isinstance(d, (int, float))]
 
         if valid_distances:
-            if any(d > 1000 for d in valid_distances):
+            if any(d > 1500 for d in valid_distances):
                 data['inout_status'] = 'Out'
-            elif any(d < 1000 for d in valid_distances):
+            elif any(d < 1500 for d in valid_distances):
                 data['inout_status'] = 'In'
 
-        # --- ACTIVE / INACTIVE (unchanged) ---
         last_updates = [
             data['distance1_last_update'],
             data['distance2_last_update'],
             data['distance3_last_update'],
         ]
-
         new_status = (
             'Active'
-            if any(ts and (server_utc_now - ts <= timedelta(seconds=20))
-                   for ts in last_updates)
+            if any(ts and (server_utc_now - ts <= timedelta(seconds=20)) for ts in last_updates)
             else 'Inactive'
         )
-
-        old_status = data.get('status')
         data['status'] = new_status
 
-        # -------------------------------
-        # StatusLog mapping logic
-        # -------------------------------
         statuslog_status = None
-
-        #  FORCE OUT WHEN INACTIVE (UI + DB)
         if new_status == 'Inactive':
             data['inout_status'] = 'Out'
             statuslog_status = 'Out'
-
         elif new_status == 'Active' and valid_distances:
-            if any(d > 1000 for d in valid_distances):
+            if any(d > 1500 for d in valid_distances):
                 statuslog_status = 'In'
-            elif any(d < 1000 for d in valid_distances):
+            elif any(d < 1500 for d in valid_distances):
                 statuslog_status = 'Out'
 
-        # --- STATUS LOG (ONLY WHEN CHANGED) ---
         if statuslog_status:
-            last_log = StatusLog.objects.filter(
-                deviceUID=device_uid
-            ).order_by('-timestamp').first()
-
+            last_log = StatusLog.objects.filter(deviceUID=device_uid).order_by('-timestamp').first()
             if not last_log or last_log.status != statuslog_status:
                 StatusLog.objects.create(
                     deviceUID=device_uid,
@@ -301,30 +261,23 @@ def transmitter_data_json(request):
     for uid in stale_devices:
         DEVICE_CACHE.pop(uid, None)
 
-    # --- Response ---
-    aggregated_reads = list(DEVICE_CACHE.values())
+    aggregated_output = sorted(DEVICE_CACHE.values(), key=lambda d: _sort_key(d['label']))
+
     return JsonResponse({
-        'reads': aggregated_reads,
+        'reads': aggregated_output,
         'timestamp': server_utc_now.isoformat(),
-        'count': len(aggregated_reads)
+        'count': len(aggregated_output)
     })
-
-
-from django.http import JsonResponse
-from .models import StatusLog
 
 
 def status_log_json(request):
     logs = StatusLog.objects.order_by('-timestamp')[:250]
-
-    # NEW: attach friendly labels here too, so the Status Logs page
-    # can show "1" instead of "200081" if you want.
     label_map = dict(DeviceLabel.objects.values_list('deviceUID', 'label'))
 
     data = [
         {
             "deviceUID": log.deviceUID,
-            "label": label_map.get(log.deviceUID, log.deviceUID),  # NEW
+            "label": label_map.get(log.deviceUID, log.deviceUID),
             "status": log.status,
             "timestamp": log.timestamp.strftime("%Y-%m-%d %H:%M:%S")
         }
@@ -334,23 +287,19 @@ def status_log_json(request):
     return JsonResponse({"status_logs": data})
 
 
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+
 def custom_404_view(request, exception):
     return render(request, '404.html', status=404)
 
-
-from django.views.decorators.csrf import csrf_exempt
-from django.http import JsonResponse
-from django.utils.timezone import now
-from .models import Read, StatusLog
 
 @csrf_exempt
 def delete_read(request, device_uid):
     if request.method == 'POST':
         try:
-            # 🔹 FORCE StatusLog = Out on delete
-            last_log = StatusLog.objects.filter(
-                deviceUID=device_uid
-            ).order_by('-timestamp').first()
+            last_log = StatusLog.objects.filter(deviceUID=device_uid).order_by('-timestamp').first()
 
             if not last_log or last_log.status != 'Out':
                 StatusLog.objects.create(
@@ -359,12 +308,10 @@ def delete_read(request, device_uid):
                     timestamp=now()
                 )
 
-            # 🔹 Delete reads
             reads = Read.objects.filter(deviceUID=device_uid)
             if reads.exists():
                 reads.delete()
 
-            # 🔹 Remove from DEVICE_CACHE
             if device_uid in DEVICE_CACHE:
                 del DEVICE_CACHE[device_uid]
 
@@ -374,43 +321,25 @@ def delete_read(request, device_uid):
             })
 
         except Exception as e:
-            return JsonResponse(
-                {'success': False, 'error': str(e)},
-                status=500
-            )
+            return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
-    return JsonResponse(
-        {'success': False, 'message': 'Invalid request method.'},
-        status=400
-    )
+    return JsonResponse({'success': False, 'message': 'Invalid request method.'}, status=400)
 
 
-import os
-import subprocess
-from datetime import datetime
-from django.shortcuts import render
-from django.conf import settings
-from django.utils import timezone
-from .models import StatusLog, CommonVideo
+# ---------------------------------------------------------------------------
+# Video trimming
+# ---------------------------------------------------------------------------
 
 def trim_video(request):
     distinct_uids = StatusLog.objects.values_list("deviceUID", flat=True).distinct()
-
-    # NEW: attach the friendly label to each UID for the dropdown.
     label_map = dict(DeviceLabel.objects.values_list('deviceUID', 'label'))
-
-    def sort_key(label):
-        # Sort numerically if the label is a number (e.g. "1","2","10"),
-        # otherwise fall back to alphabetical for any non-numeric labels.
-        return (0, int(label)) if label.isdigit() else (1, label)
-
 
     distinct_device_count = sorted(
         [
             {"deviceUID": uid, "label": label_map.get(uid, uid)}
             for uid in distinct_uids
         ],
-        key=lambda d: sort_key(d["label"])
+        key=lambda d: _sort_key(d["label"])
     )
 
     if request.method == "POST":
@@ -424,18 +353,10 @@ def trim_video(request):
                 "error_message": "All fields are required."
             })
 
-        #  Timezone-aware game start datetime
-        naive_game_start = datetime.strptime(
-            f"{log_date} {game_start_time}", "%Y-%m-%d %H:%M:%S"
-        )
-        game_start_dt = timezone.make_aware(
-            naive_game_start,
-            timezone.get_current_timezone()
-        )
-
+        naive_game_start = datetime.strptime(f"{log_date} {game_start_time}", "%Y-%m-%d %H:%M:%S")
+        game_start_dt = timezone.make_aware(naive_game_start, timezone.get_current_timezone())
         selected_date = naive_game_start.date()
 
-        #  Fetch logs ONLY after game start
         logs = StatusLog.objects.filter(
             deviceUID=device_uid,
             timestamp__date=selected_date,
@@ -448,8 +369,6 @@ def trim_video(request):
                 "error_message": "No Active/Inactive logs after game start time."
             })
 
-        
-        #  Video matching the SELECTED DATE (not just the first uploaded one)
         video_obj = CommonVideo.objects.filter(log_date=selected_date).order_by("id").first()
         if not video_obj or not video_obj.video_file:
             return render(request, "trim_video.html", {
@@ -458,16 +377,14 @@ def trim_video(request):
             })
 
         video_path = video_obj.video_file.path
-
         temp_dir = os.path.join(settings.MEDIA_ROOT, "temp")
         os.makedirs(temp_dir, exist_ok=True)
 
         segment_files = []
         active_start = None
         index = 0
-        fallback_used = False   #  NEW FLAG
+        fallback_used = False
 
-        #  EXISTING LOGIC — UNCHANGED
         for log in logs:
             if log.status == "In":
                 active_start = log.timestamp
@@ -478,7 +395,6 @@ def trim_video(request):
 
                 if duration > 0:
                     segment_path = os.path.join(temp_dir, f"segment_{index}.mp4")
-
                     subprocess.run(
                         [
                             settings.FFMPEG_BINARY, "-y",
@@ -498,8 +414,6 @@ def trim_video(request):
 
                 active_start = None
 
-        #  ADD-ON FEATURE (NO EXISTING LOGIC TOUCHED)
-        # Active exists but no Inactive OR video ended
         if active_start:
             video_clip = VideoFileClip(video_path)
             video_duration = video_clip.duration
@@ -510,7 +424,6 @@ def trim_video(request):
 
             if remaining_duration > 0:
                 segment_path = os.path.join(temp_dir, f"segment_{index}.mp4")
-
                 subprocess.run(
                     [
                         settings.FFMPEG_BINARY, "-y",
@@ -534,7 +447,6 @@ def trim_video(request):
                 "error_message": "No valid Active → Inactive segments found."
             })
 
-        # 🔹 Merge segments (UNCHANGED)
         concat_file = os.path.join(temp_dir, "concat.txt")
         with open(concat_file, "w", encoding="utf-8") as f:
             for seg in segment_files:
@@ -556,7 +468,6 @@ def trim_video(request):
             check=True
         )
 
-        # 🧹 Cleanup
         for f in segment_files + [concat_file]:
             if os.path.exists(f):
                 os.remove(f)
@@ -571,17 +482,12 @@ def trim_video(request):
             )
         })
 
-    return render(request, "trim_video.html", {
-        "distinct_device_count": distinct_device_count
-    })
-
-# ... (check_statuslog remains unchanged)
+    return render(request, "trim_video.html", {"distinct_device_count": distinct_device_count})
 
 
 def check_statuslog(request):
     """
     AJAX view to check if StatusLog and CommonVideo are available for the selected UID and date.
-    Returns JSON with availability status and message.
     """
     device_uid = request.GET.get('device_uid')
     date_str = request.GET.get('date')
@@ -592,12 +498,10 @@ def check_statuslog(request):
     try:
         selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
 
-        # Check for logs
         status_logs = StatusLog.objects.filter(deviceUID=device_uid, timestamp__date=selected_date)
         logs_exist = status_logs.exists()
         log_count = status_logs.count()
 
-        # Check for video
         video_exist = CommonVideo.objects.filter(log_date=selected_date).exists()
 
         if logs_exist and video_exist:
@@ -616,12 +520,6 @@ def check_statuslog(request):
         return JsonResponse({'available': False, 'message': 'Invalid date format.'})
 
 
-import os
-from django.shortcuts import render, redirect
-from django.contrib import messages
-from django.conf import settings
-from .models import CommonVideo
-
 def upload_video(request):
     if request.method == "POST":
         video_file = request.FILES.get("video_file")
@@ -632,8 +530,6 @@ def upload_video(request):
             return redirect("upload_video")
 
         try:
-            # Only replace a video if one already exists for THIS SAME DATE.
-            # Videos for other dates are left untouched.
             existing_video = CommonVideo.objects.filter(log_date=log_date).first()
 
             if existing_video:
@@ -643,10 +539,7 @@ def upload_video(request):
                 existing_video.save()
                 messages.success(request, f"Video for {log_date} replaced successfully.")
             else:
-                CommonVideo.objects.create(
-                    video_file=video_file,
-                    log_date=log_date
-                )
+                CommonVideo.objects.create(video_file=video_file, log_date=log_date)
                 messages.success(request, f"New video uploaded successfully for {log_date}.")
 
         except Exception as e:
@@ -657,11 +550,6 @@ def upload_video(request):
     return render(request, "upload_video.html")
 
 
-from django.http import JsonResponse
-from datetime import datetime
-from .models import CommonVideo
-import os
-
 def check_video_availability(request):
     date_str = request.GET.get('date')
 
@@ -670,52 +558,33 @@ def check_video_availability(request):
 
     try:
         selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-
         video = CommonVideo.objects.filter(log_date=selected_date).first()
 
-        #  No DB record
         if not video or not video.video_file:
             return JsonResponse({'available': False})
 
-        #  File missing from disk
         if not os.path.exists(video.video_file.path):
             return JsonResponse({'available': False})
 
-        #  DB + File both exist
         return JsonResponse({'available': True})
 
     except Exception:
         return JsonResponse({'available': False})
 
 
-from datetime import datetime, time
-from django.utils import timezone
-from django.http import JsonResponse
-from .models import StatusLog
-
 def check_statuslog_availability(request):
     device_uid = request.GET.get('device_uid')
     date_str = request.GET.get('date')
 
     if not device_uid or not date_str:
-        return JsonResponse({
-            'available': False,
-            'message': 'Device UID or date not provided'
-        })
+        return JsonResponse({'available': False, 'message': 'Device UID or date not provided'})
 
     try:
-        # Parse the date string from the request
         selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
 
-        # Create UTC-aware datetime range for the whole day
-        start_datetime = timezone.make_aware(
-            datetime.combine(selected_date, time.min), timezone.utc
-        )
-        end_datetime = timezone.make_aware(
-            datetime.combine(selected_date, time.max), timezone.utc
-        )
+        start_datetime = timezone.make_aware(datetime.combine(selected_date, time.min), timezone.utc)
+        end_datetime = timezone.make_aware(datetime.combine(selected_date, time.max), timezone.utc)
 
-        # Query logs for this device UID and date
         status_logs = StatusLog.objects.filter(
             deviceUID=device_uid,
             timestamp__gte=start_datetime,
@@ -734,7 +603,4 @@ def check_statuslog_availability(request):
             })
 
     except Exception as e:
-        return JsonResponse({
-            'available': False,
-            'message': f'Error: {str(e)}'
-        })
+        return JsonResponse({'available': False, 'message': f'Error: {str(e)}'})

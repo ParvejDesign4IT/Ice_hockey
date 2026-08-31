@@ -36,11 +36,11 @@
     <table id="distanceTable">
         <thead>
             <tr>
-                <th>Player No.</th>
+                <th>Player Number</th>
                 <th>Last Updated UTC</th>
-                <th>Distance (Reader 1)</th>
-                <th>Distance (Reader 2)</th>
-                <th>Distance (Reader 3)</th>
+                <th>Anchor 1</th>
+                <th>Anchor 2</th>
+                <th>Anchor 3</th>
                 <th>Device Status</th>
                 <th>Bench Status</th>
                 <th>Action</th>
@@ -91,13 +91,28 @@ function updateTableData() {
     fetch('/transmitter-data/')
         .then(response => response.json())
         .then(data => {
+            // Sort ascending by label (numeric-aware)
+            const sortedReads = [...data.reads].sort((a, b) => {
+                const aNum = parseFloat(a.label);
+                const bNum = parseFloat(b.label);
+                const aIsNum = !isNaN(aNum) && String(a.label).trim() !== '';
+                const bIsNum = !isNaN(bNum) && String(b.label).trim() !== '';
+                if (aIsNum && bIsNum) return aNum - bNum;
+                if (aIsNum) return -1;
+                if (bIsNum) return 1;
+                return String(a.label).localeCompare(String(b.label));
+            });
+
             const existingRows = new Set();
-            data.reads.forEach(read => {
+            const tbody = document.getElementById('tableBody');
+
+            sortedReads.forEach(read => {
                 existingRows.add(`row-${read.deviceUID}`);
                 const row = document.getElementById(`row-${read.deviceUID}`) || createNewRow(read);
                 updateRow(row, read);
+                tbody.appendChild(row); // re-appending in sorted order moves it to the end, keeping DOM order correct
             });
-            const tbody = document.getElementById('tableBody');
+
             Array.from(tbody.children).forEach(row => {
                 if (!existingRows.has(row.id)) row.remove();
             });
