@@ -70,8 +70,9 @@ function updateStatusLogs() {
             //  TAKE ONLY FIRST 250 (already sorted DESC)
             data.status_logs.slice(0, 250).forEach(log => {
                 const row = document.createElement('tr');
+                // Shows friendly label (falls back to raw deviceUID if unmapped)
                 row.innerHTML = `
-                    <td>${log.deviceUID}</td>
+                    <td>${log.label || log.deviceUID}</td>
                     <td style="font-weight:bold; color:${log.status === 'In' ? 'green' : 'red'};">
                         ${log.status}
                     </td>

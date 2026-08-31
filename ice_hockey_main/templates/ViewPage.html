@@ -36,20 +36,22 @@
     <table id="distanceTable">
         <thead>
             <tr>
-                <th>Device UID</th>
-                <th>Timestamp UTC</th>
-                <th>Distance 1</th>
-                <th>Distance 2</th>
-                <th>Distance 3</th>
-                <th>Status</th>
-                <th>Status Of Bench</th>
+                <th>Player No.</th>
+                <th>Last Updated UTC</th>
+                <th>Distance (Reader 1)</th>
+                <th>Distance (Reader 2)</th>
+                <th>Distance (Reader 3)</th>
+                <th>Device Status</th>
+                <th>Bench Status</th>
                 <th>Action</th>
             </tr>
         </thead>
         <tbody id="tableBody">
             {% for read in aggregated_reads %}
+            <!-- Row ID and delete action still use the REAL deviceUID -->
             <tr id="row-{{ read.deviceUID }}">
-                <td>{{ read.deviceUID }}</td>
+                <!-- Display shows the friendly label instead -->
+                <td>{{ read.label|default:read.deviceUID }}</td>
                 <td class="timestamp">{{ read.timeStampUTC }}</td>
                 <td>{{ read.distance1|default:"N/A" }}</td>
                 <td>{{ read.distance2|default:"N/A" }}</td>
@@ -106,8 +108,9 @@ function createNewRow(read) {
     const tbody = document.getElementById('tableBody');
     const newRow = document.createElement('tr');
     newRow.id = `row-${read.deviceUID}`;
+    // Display uses read.label (falls back to deviceUID if unmapped)
     newRow.innerHTML = `
-        <td>${read.deviceUID}</td>
+        <td>${read.label || read.deviceUID}</td>
         <td class="timestamp">${read.timeStampUTC}</td>
         <td>${read.distance1 || 'N/A'}</td>
         <td>${read.distance2 || 'N/A'}</td>
@@ -130,6 +133,8 @@ function getCSRFToken() {
 }
 
 function updateRow(row, read) {
+    // Cell 0 holds the label, cell 1 is timestamp -- update label too
+    row.cells[0].textContent = read.label || read.deviceUID;
     row.querySelector('.timestamp').textContent = read.timeStampUTC;
     row.cells[2].textContent = read.distance1 || 'N/A';
     row.cells[3].textContent = read.distance2 || 'N/A';

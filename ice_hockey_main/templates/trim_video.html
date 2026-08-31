@@ -134,8 +134,9 @@
         <select name="device_uid" required>
             <option value="">-- Select a Device UID --</option>
             {% for device in distinct_device_count %}
+                <!-- value still submits the REAL deviceUID; visible text is the friendly label -->
                 <option value="{{ device.deviceUID }}" {% if device.deviceUID == selected_device_uid %}selected{% endif %}>
-                    {{ device.deviceUID }}
+                    {{ device.label }}
                 </option>
             {% endfor %}
         </select>

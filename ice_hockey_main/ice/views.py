@@ -20,7 +20,7 @@ from django.contrib import messages
 from django.shortcuts import render
 from django.conf import settings
 from moviepy.video.io.VideoFileClip import VideoFileClip
-from .models import StatusLog, CommonVideo
+from .models import StatusLog, CommonVideo, DeviceLabel  # <-- added DeviceLabel
 import os
 
 
@@ -30,7 +30,7 @@ def create_transmitter(request):
     if request.method == 'POST':
         try:
             data = json.loads(request.body)
-            
+
             # Print the posted data to the terminal
             print("Received POST data:", data)
             print("------------------------------------------------------------------------------------------------------------------------------------")
@@ -56,9 +56,6 @@ def create_transmitter(request):
     return Response({'message': 'Method not allowed'}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
 
-
-
-
 # views.py
 import math
 from django.shortcuts import render
@@ -74,15 +71,20 @@ from datetime import timedelta
 from .models import Read, Transmitter, StatusLog
 from django.db.models import Subquery, OuterRef
 
+
 def transmitter_list(request):
     latest_subquery = Read.objects.filter(
         deviceUID=OuterRef('deviceUID')
     ).order_by('-timeStampUTC').values('id')[:1]
-    
+
     recent_reads = Read.objects.filter(
         id__in=Subquery(latest_subquery)
     ).select_related('transmitter')
-    
+
+    # NEW: build a quick lookup dict {deviceUID: label} in ONE query,
+    # instead of hitting the DB per-row.
+    label_map = dict(DeviceLabel.objects.values_list('deviceUID', 'label'))
+
     device_data = {}
 
     for read in recent_reads:
@@ -91,6 +93,10 @@ def transmitter_list(request):
         if device_uid not in device_data:
             device_data[device_uid] = {
                 'deviceUID': device_uid,
+                # NEW: friendly label for display. Falls back to the
+                # raw deviceUID if no mapping exists yet, so nothing
+                # ever shows blank.
+                'label': label_map.get(device_uid, device_uid),
                 'distance1': None,
                 'distance2': None,
                 'distance3': None,
@@ -123,7 +129,7 @@ def transmitter_list(request):
         if read.timeStampUTC > device_data[device_uid]['timeStampUTC']:
             device_data[device_uid]['timeStampUTC'] = read.timeStampUTC
 
-        #  Status based only on distances > 1500
+        #  Status based only on distances > 1000
         distances = [
             device_data[device_uid]['distance1'],
             device_data[device_uid]['distance2'],
@@ -134,7 +140,6 @@ def transmitter_list(request):
         else:
             device_data[device_uid]['status'] = 'In'
 
-  
     aggregated_reads = list(device_data.values())
     return render(request, 'ViewPage.html', {'aggregated_reads': aggregated_reads})
 
@@ -142,6 +147,7 @@ def transmitter_list(request):
 def status_log_view(request):
     status_logs = StatusLog.objects.all()  # Adjust this query based on your needs
     return render(request, 'status_log.html', {'status_logs': status_logs})
+
 
 import math
 from datetime import timedelta, timezone as dt_timezone
@@ -152,11 +158,12 @@ from .models import Read, StatusLog
 
 DEVICE_CACHE = {}
 
+
 def transmitter_data_json(request):
     """
     Returns JSON data for all devices with latest readings,
     computed IN/OUT, Active/Inactive status, trilateration coordinates,
-    and server UTC timestamp.
+    friendly display label, and server UTC timestamp.
     """
     # --- Get latest read per deviceUID ---
     latest_subquery = Read.objects.filter(
@@ -169,6 +176,9 @@ def transmitter_data_json(request):
 
     server_utc_now = now()
 
+    # NEW: one query for all label mappings, reused below.
+    label_map = dict(DeviceLabel.objects.values_list('deviceUID', 'label'))
+
     # --- Update DEVICE_CACHE with new readings ---
     for read in recent_reads:
         device_uid = read.deviceUID
@@ -176,6 +186,7 @@ def transmitter_data_json(request):
         if device_uid not in DEVICE_CACHE:
             DEVICE_CACHE[device_uid] = {
                 'deviceUID': device_uid,
+                'label': label_map.get(device_uid, device_uid),  # NEW
                 'distance1': None,
                 'distance2': None,
                 'distance3': None,
@@ -188,6 +199,10 @@ def transmitter_data_json(request):
                 'distance2_last_update': None,
                 'distance3_last_update': None,
             }
+        else:
+            # NEW: keep label fresh in case a mapping was added/edited
+            # after this device was first cached.
+            DEVICE_CACHE[device_uid]['label'] = label_map.get(device_uid, device_uid)
 
         transmitter_serial = (
             read.transmitter.transmitterSerialNumber
@@ -295,17 +310,21 @@ def transmitter_data_json(request):
     })
 
 
-
-
 from django.http import JsonResponse
 from .models import StatusLog
+
 
 def status_log_json(request):
     logs = StatusLog.objects.order_by('-timestamp')[:250]
 
+    # NEW: attach friendly labels here too, so the Status Logs page
+    # can show "1" instead of "200081" if you want.
+    label_map = dict(DeviceLabel.objects.values_list('deviceUID', 'label'))
+
     data = [
         {
             "deviceUID": log.deviceUID,
+            "label": label_map.get(log.deviceUID, log.deviceUID),  # NEW
             "status": log.status,
             "timestamp": log.timestamp.strftime("%Y-%m-%d %H:%M:%S")
         }
@@ -315,16 +334,16 @@ def status_log_json(request):
     return JsonResponse({"status_logs": data})
 
 
-
 def custom_404_view(request, exception):
     return render(request, '404.html', status=404)
+
 
 from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse
 from django.utils.timezone import now
 from .models import Read, StatusLog
 
-@csrf_exempt  
+@csrf_exempt
 def delete_read(request, device_uid):
     if request.method == 'POST':
         try:
@@ -337,7 +356,7 @@ def delete_read(request, device_uid):
                 StatusLog.objects.create(
                     deviceUID=device_uid,
                     status='Out',
-                    timestamp=now() 
+                    timestamp=now()
                 )
 
             # 🔹 Delete reads
@@ -366,7 +385,6 @@ def delete_read(request, device_uid):
     )
 
 
-
 import os
 import subprocess
 from datetime import datetime
@@ -376,7 +394,24 @@ from django.utils import timezone
 from .models import StatusLog, CommonVideo
 
 def trim_video(request):
-    distinct_device_count = StatusLog.objects.values("deviceUID").distinct()
+    distinct_uids = StatusLog.objects.values_list("deviceUID", flat=True).distinct()
+
+    # NEW: attach the friendly label to each UID for the dropdown.
+    label_map = dict(DeviceLabel.objects.values_list('deviceUID', 'label'))
+
+    def sort_key(label):
+        # Sort numerically if the label is a number (e.g. "1","2","10"),
+        # otherwise fall back to alphabetical for any non-numeric labels.
+        return (0, int(label)) if label.isdigit() else (1, label)
+
+
+    distinct_device_count = sorted(
+        [
+            {"deviceUID": uid, "label": label_map.get(uid, uid)}
+            for uid in distinct_uids
+        ],
+        key=lambda d: sort_key(d["label"])
+    )
 
     if request.method == "POST":
         device_uid = request.POST.get("device_uid")
@@ -413,12 +448,13 @@ def trim_video(request):
                 "error_message": "No Active/Inactive logs after game start time."
             })
 
-        #  First uploaded video
-        video_obj = CommonVideo.objects.order_by("id").first()
+        
+        #  Video matching the SELECTED DATE (not just the first uploaded one)
+        video_obj = CommonVideo.objects.filter(log_date=selected_date).order_by("id").first()
         if not video_obj or not video_obj.video_file:
             return render(request, "trim_video.html", {
                 "distinct_device_count": distinct_device_count,
-                "error_message": "No uploaded video found."
+                "error_message": f"No uploaded video found for {selected_date}."
             })
 
         video_path = video_obj.video_file.path
@@ -442,7 +478,6 @@ def trim_video(request):
 
                 if duration > 0:
                     segment_path = os.path.join(temp_dir, f"segment_{index}.mp4")
-
 
                     subprocess.run(
                         [
@@ -475,7 +510,6 @@ def trim_video(request):
 
             if remaining_duration > 0:
                 segment_path = os.path.join(temp_dir, f"segment_{index}.mp4")
-
 
                 subprocess.run(
                     [
@@ -510,7 +544,6 @@ def trim_video(request):
         output_name = f"trimmed_{device_uid}_{selected_date}.mp4"
         output_path = os.path.join(settings.MEDIA_ROOT, output_name)
 
-        
         subprocess.run(
             [
                 settings.FFMPEG_BINARY, "-y",
@@ -552,21 +585,21 @@ def check_statuslog(request):
     """
     device_uid = request.GET.get('device_uid')
     date_str = request.GET.get('date')
-    
+
     if not device_uid or not date_str:
         return JsonResponse({'available': False, 'message': 'Invalid parameters.'})
-    
+
     try:
         selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        
+
         # Check for logs
         status_logs = StatusLog.objects.filter(deviceUID=device_uid, timestamp__date=selected_date)
         logs_exist = status_logs.exists()
         log_count = status_logs.count()
-        
+
         # Check for video
         video_exist = CommonVideo.objects.filter(log_date=selected_date).exists()
-        
+
         if logs_exist and video_exist:
             if log_count % 2 == 0:
                 return JsonResponse({'available': True, 'message': f'Status logs ({log_count} entries) and video available for the selected device and date.'})
@@ -578,10 +611,9 @@ def check_statuslog(request):
             return JsonResponse({'available': False, 'message': 'Video available, but no status logs found for the selected device and date.'})
         else:
             return JsonResponse({'available': False, 'message': 'No status logs or video found for the selected device and date.'})
-    
+
     except ValueError:
         return JsonResponse({'available': False, 'message': 'Invalid date format.'})
-
 
 
 import os
@@ -589,7 +621,6 @@ from django.shortcuts import render, redirect
 from django.contrib import messages
 from django.conf import settings
 from .models import CommonVideo
-
 
 def upload_video(request):
     if request.method == "POST":
@@ -601,20 +632,22 @@ def upload_video(request):
             return redirect("upload_video")
 
         try:
-            # 🔥 DELETE OLD VIDEOS (DB + FILESYSTEM)
-            old_videos = CommonVideo.objects.all()
-            for video in old_videos:
-                if video.video_file and os.path.exists(video.video_file.path):
-                    os.remove(video.video_file.path)
-                video.delete()
+            # Only replace a video if one already exists for THIS SAME DATE.
+            # Videos for other dates are left untouched.
+            existing_video = CommonVideo.objects.filter(log_date=log_date).first()
 
-            # ✅ SAVE NEW VIDEO
-            new_video = CommonVideo.objects.create(
-                video_file=video_file,
-                log_date=log_date
-            )
-
-            messages.success(request, "New video uploaded successfully. Old videos removed.")
+            if existing_video:
+                if existing_video.video_file and os.path.exists(existing_video.video_file.path):
+                    os.remove(existing_video.video_file.path)
+                existing_video.video_file = video_file
+                existing_video.save()
+                messages.success(request, f"Video for {log_date} replaced successfully.")
+            else:
+                CommonVideo.objects.create(
+                    video_file=video_file,
+                    log_date=log_date
+                )
+                messages.success(request, f"New video uploaded successfully for {log_date}.")
 
         except Exception as e:
             messages.error(request, f"Upload failed: {str(e)}")
@@ -640,21 +673,21 @@ def check_video_availability(request):
 
         video = CommonVideo.objects.filter(log_date=selected_date).first()
 
-        # ❌ No DB record
+        #  No DB record
         if not video or not video.video_file:
             return JsonResponse({'available': False})
 
-        # ❌ File missing from disk
+        #  File missing from disk
         if not os.path.exists(video.video_file.path):
             return JsonResponse({'available': False})
 
-        # ✅ DB + File both exist
+        #  DB + File both exist
         return JsonResponse({'available': True})
 
     except Exception:
         return JsonResponse({'available': False})
-    
-    
+
+
 from datetime import datetime, time
 from django.utils import timezone
 from django.http import JsonResponse
