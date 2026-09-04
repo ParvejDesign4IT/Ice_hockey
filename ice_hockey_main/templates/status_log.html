@@ -3,50 +3,129 @@
 <head>
     <title>Status Logs</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        h1 { text-align: center; }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 20px;
+        :root {
+            --bg: #2c4c78;
+            --bg-gradient-end: #323c66;
+            --surface: #ffffff;
+            --surface-alt: #f8fafc;
+            --surface-hover: #eef2f7;
+            --border: #e8edf3;
+            --text: #1a2332;
+            --text-muted: #6b7a8f;
+            --primary: #3b7dd8;
+            --primary-dark: #2c5fa8;
+            --success-bg: #e8f9ee;
+            --success-text: #0e8f42;
+            --danger-bg: #fdecec;
+            --danger-text: #c0392b;
         }
-        table, th, td { border: 1px solid #dddddd; }
-        th, td { padding: 8px; text-align: center; }
-        th { background-color: #f2f2f2; }
-        tr:nth-child(even) { background-color: #f9f9f9; }
+        * { box-sizing: border-box; }
+        body {
+            font-family: 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 40px 24px 60px;
+            background: linear-gradient(160deg, var(--bg) 0%, var(--bg-gradient-end) 100%);
+            color: #ffffff;
+            min-height: 100vh;
+        }
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            max-width: 1500px;
+            margin: 0 auto 32px auto;
+        }
+        .page-title {
+            font-size: 35px;
+            font-weight: 700;
+            margin: 0;
+            color: #ffffff;
+            letter-spacing: -0.01em;
+            text-align: left;
+        }
+        .page-actions { display: flex; gap: 12px; }
 
-        .back-button, .videoTrim-button {
-            position: absolute;
-            padding: 10px 20px;
-            background-color: #007BFF;
+        .action-button {
+            padding: 11px 22px;
+            background-color: var(--primary);
             color: white;
             border: none;
-            border-radius: 5px;
+            border-radius: 9px;
             cursor: pointer;
             text-decoration: none;
+            font-size: 20px;
+            font-weight: 600;
+            box-shadow: 0 4px 14px rgba(59, 125, 216, 0.35);
+            transition: all 0.15s ease;
+            display: inline-flex;
+            align-items: center;
         }
-        .back-button:hover, .videoTrim-button:hover {
-            background-color: #0056b3;
+        .action-button:hover {
+            background-color: var(--primary-dark);
+            transform: translateY(-1px);
         }
-        .back-button { top: 20px; right: 20px; }
-        .videoTrim-button { top: 20px; right: 140px; }
+        .table-container {
+            max-width: 1500px;
+            margin: 0 auto;
+            background: var(--surface);
+            border-radius: 16px;
+            box-shadow: 0 25px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        table { width: 100%; border-collapse: collapse; }
+        .table-header-cell {
+            padding: 17px 18px;
+            text-align: center;
+            font-size: 16px;
+            font-weight: 600;
+            background-color: var(--surface-alt);
+            color: #0864ce;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            border-bottom: 1px solid var(--border);
+        }
+        .table-body-cell {
+            padding: 15px 18px;
+            text-align: center;
+            font-size: 16px;
+            font-weight: 600;
+            border-bottom: 1px solid var(--border);
+            color: var(--text);
+        }
+        tbody tr:hover { background-color: var(--surface-hover); }
+        tbody tr:last-child .table-body-cell { border-bottom: none; }
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 13px;
+            border-radius: 999px;
+            font-size: 16px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+        .badge-in { background-color: var(--success-bg); color: var(--success-text); }
+        .badge-out { background-color: var(--danger-bg); color: var(--danger-text); }
     </style>
 </head>
 <body>
 
-    <div class="container">
-        <h1>Status Logs</h1>
+    <div class="page-header">
+        <h1 class="page-title">Status Logs</h1>
+        <div class="page-actions">
+            <a href="{% url 'trim_video' %}" class="action-button">Trim your game</a>
+            <a href="/" class="action-button">Back</a>
+        </div>
+    </div>
 
-        <a href="{% url 'trim_video' %}" class="videoTrim-button">Trim your game</a>
-        <a href="/" class="back-button">Back</a>
-
+    <div class="table-container">
         <table id="statusTable">
             <thead>
                 <tr>
-                    <th>Player Number</th>
-                    <th>Ground Status</th>
-                    <th>Last Updated UTC</th>
+                    <th class="table-header-cell">Player Number</th>
+                    <th class="table-header-cell">Ground Status</th>
+                    <th class="table-header-cell">Last Updated UTC</th>
                 </tr>
             </thead>
             <tbody id="statusBody">
@@ -72,11 +151,9 @@ function updateStatusLogs() {
                 const row = document.createElement('tr');
                 // Shows friendly label (falls back to raw deviceUID if unmapped)
                 row.innerHTML = `
-                    <td>${log.label || log.deviceUID}</td>
-                    <td style="font-weight:bold; color:${log.status === 'In' ? 'green' : 'red'};">
-                        ${log.status}
-                    </td>
-                    <td>${log.timestamp}</td>
+                    <td class="table-body-cell">${log.label || log.deviceUID}</td>
+                    <td class="table-body-cell"><span class="badge ${log.status === 'In' ? 'badge-in' : 'badge-out'}">${log.status}</span></td>
+                    <td class="table-body-cell">${log.timestamp}</td>
                 `;
                 tbody.appendChild(row);
             });
@@ -93,7 +170,6 @@ setInterval(() => {
     updateStatusLogs();
 }, 1000);
 </script>
-
 
 </body>
 </html>

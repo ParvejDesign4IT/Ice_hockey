@@ -5,9 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Trim Video</title>
     <style>
+        :root {
+            --bg: #2c4c78;
+            --bg-gradient-end: #323c66;
+            --surface: #ffffff;
+            --text: #1a2332;
+            --text-muted: #6b7a8f;
+            --primary: #3b7dd8;
+            --primary-dark: #2c5fa8;
+            --success-bg: #e8f9ee;
+            --success-text: #0e8f42;
+            --danger-bg: #fdecec;
+            --danger-text: #c0392b;
+            --border: #e8edf3;
+        }
+        * { box-sizing: border-box; }
         body {
-            font-family: Arial, sans-serif;
-            background-color: #f9f9f9;
+            font-family: 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: linear-gradient(160deg, var(--bg) 0%, var(--bg-gradient-end) 100%);
             margin: 0;
             padding: 0;
             display: flex;
@@ -15,68 +30,72 @@
             align-items: center;
             min-height: 100vh;
         }
-
         h1 {
             text-align: center;
-            color: #333;
+            color: var(--text);
+            font-size: 26px;
+            font-weight: 700;
         }
-
         .form-container {
-            background-color: #fff;
-            padding: 30px;
-            border-radius: 8px;
-            box-shadow: 0px 4px 15px rgba(0, 0, 0, 0.1);
-            max-width: 400px;
+            background-color: var(--surface);
+            padding: 32px;
+            border-radius: 16px;
+            box-shadow: 0 25px 60px rgba(0,0,0,0.3);
+            max-width: 600px;
             width: 100%;
             margin: 20px;
         }
-
         label {
             display: block;
-            margin-top: 10px;
-            font-weight: bold;
-            color: #555;
+            margin-top: 16px;
+            font-weight: 600;
+            color: var(--text);
+            font-size: 16px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
         }
-
         select, input[type="text"], input[type="date"] {
             width: 100%;
             padding: 10px;
-            margin-top: 5px;
+            margin-top: 6px;
             margin-bottom: 15px;
-            border: 1px solid #ccc;
-            border-radius: 5px;
-            font-size: 16px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 15px;
         }
-
+        select:focus, input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(59, 125, 216, 0.15);
+        }
         input[type="submit"] {
-            background-color: #007BFF;
+            background-color: var(--primary);
             color: white;
-            padding: 10px;
+            padding: 12px;
             border: none;
-            border-radius: 5px;
+            border-radius: 9px;
             cursor: pointer;
+            font-weight: 600;
             width: 100%;
+            box-shadow: 0 4px 14px rgba(59, 125, 216, 0.35);
+            transition: all 0.15s ease;
+        }
+        input[type="submit"]:hover {
+            background-color: var(--primary-dark);
+            transform: translateY(-1px);
         }
 
         /* Availability message */
         .availability {
             padding: 12px;
-            border-radius: 5px;
+            border-radius: 8px;
             text-align: center;
-            font-weight: bold;
+            font-weight: 600;
             margin-bottom: 15px;
             display: none;
         }
-
-        .available {
-            background-color: #e6ffe6;
-            color: #2e7d32;
-        }
-
-        .not-available {
-            background-color: #ffe6e6;
-            color: #d8000c;
-        }
+        .available { background-color: var(--success-bg); color: var(--success-text); }
+        .not-available { background-color: var(--danger-bg); color: var(--danger-text); }
 
         .download-button {
             display: block;
@@ -84,33 +103,28 @@
             text-align: center;
             padding: 12px;
             margin-top: 15px;
-            background-color: #28a745;
+            background-color: var(--success-text);
             color: white;
-            border-radius: 5px;
+            border-radius: 9px;
             text-decoration: none;
+            font-weight: 600;
         }
 
-        .back-button {
+        .back-button, .upload-button {
             position: absolute;
-            top: 20px;
-            right: 20px;
-            padding: 10px 30px;
-            background-color: #007BFF;
+            padding: 11px 22px;
+            background-color: var(--primary);
             color: white;
-            border-radius: 5px;
+            border-radius: 9px;
             text-decoration: none;
+            font-size: 20px;
+            font-weight: 600;
+            box-shadow: 0 4px 14px rgba(59, 125, 216, 0.35);
+            transition: all 0.15s ease;
         }
-
-        .upload-button {
-            position: absolute;
-            top: 20px;
-            right: 120px;
-            padding: 10px 30px;
-            background-color: #007BFF;
-            color: white;
-            border-radius: 5px;
-            text-decoration: none;
-        }
+        .back-button:hover, .upload-button:hover { background-color: var(--primary-dark); transform: translateY(-1px); }
+        .back-button { top: 40px; right: 20px; }
+        .upload-button { top: 40px; right: 120px; }
     </style>
 </head>
 
@@ -121,7 +135,7 @@
     
     <!-- Error message display -->
     {% if error_message %}
-        <div class="error">{{ error_message }}</div>
+        <div class="availability not-available" style="display:block;">{{ error_message }}</div>
     {% endif %}
     
     <!-- Video availability message (AJAX) -->
@@ -180,9 +194,9 @@
     <div style="
         background:#fff;
         padding:30px 40px;
-        border-radius:8px;
+        border-radius:16px;
         text-align:center;
-        box-shadow:0 4px 15px rgba(0,0,0,0.3);
+        box-shadow:0 25px 60px rgba(0,0,0,0.3);
     ">
         <h3>✂ Trimming video...</h3>
         <p>Please wait, this may take some time.</p>

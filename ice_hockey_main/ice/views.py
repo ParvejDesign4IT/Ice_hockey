@@ -331,6 +331,8 @@ def delete_read(request, device_uid):
 # ---------------------------------------------------------------------------
 
 def trim_video(request):
+    cleanup_expired_videos()   # NEW: remove any videos from past dates first 
+
     distinct_uids = StatusLog.objects.values_list("deviceUID", flat=True).distinct()
     label_map = dict(DeviceLabel.objects.values_list('deviceUID', 'label'))
 
@@ -519,8 +521,24 @@ def check_statuslog(request):
     except ValueError:
         return JsonResponse({'available': False, 'message': 'Invalid date format.'})
 
+def cleanup_expired_videos():
+    """
+    Deletes any CommonVideo whose log_date is more than 7 days old,
+    removing both the DB record and the file from disk.
+    """
+    cutoff_date = timezone.localdate() - timedelta(days=7)
+    expired_videos = CommonVideo.objects.filter(log_date__lt=cutoff_date)
+
+    for video in expired_videos:
+        if video.video_file and os.path.exists(video.video_file.path):
+            os.remove(video.video_file.path)
+        video.delete()
+
+
 
 def upload_video(request):
+    cleanup_expired_videos()   # NEW: remove any videos from past dates first
+
     if request.method == "POST":
         video_file = request.FILES.get("video_file")
         log_date = request.POST.get("log_date")
@@ -551,6 +569,8 @@ def upload_video(request):
 
 
 def check_video_availability(request):
+    cleanup_expired_videos()   # NEW: remove any videos from past dates first
+
     date_str = request.GET.get('date')
 
     if not date_str:
