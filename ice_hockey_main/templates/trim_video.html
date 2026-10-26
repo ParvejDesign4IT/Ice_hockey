@@ -43,7 +43,7 @@
             box-shadow: 0 25px 60px rgba(0,0,0,0.3);
             max-width: 600px;
             width: 100%;
-            margin: 20px;
+            margin: 90px 20px 20px 20px;
         }
         label {
             display: block;
@@ -110,7 +110,7 @@
             font-weight: 600;
         }
 
-        .back-button, .upload-button {
+        .back-button, .upload-button, .trimmed-button {
             position: absolute;
             padding: 11px 22px;
             background-color: var(--primary);
@@ -122,9 +122,18 @@
             box-shadow: 0 4px 14px rgba(59, 125, 216, 0.35);
             transition: all 0.15s ease;
         }
-        .back-button:hover, .upload-button:hover { background-color: var(--primary-dark); transform: translateY(-1px); }
+        .back-button:hover, .upload-button:hover, .trimmed-button:hover {
+            background-color: var(--primary-dark);
+            transform: translateY(-1px);
+        }
         .back-button { top: 40px; right: 20px; }
         .upload-button { top: 40px; right: 120px; }
+        .trimmed-button { top: 40px; right: 350px; }
+
+        /* Progress bar */
+        .progress-track { background: var(--border); border-radius: 999px; overflow: hidden; height: 14px; margin-top: 16px; }
+        .progress-bar { height: 100%; width: 0; background: var(--primary); border-radius: 999px; transition: width 0.3s ease; }
+        .progress-text { margin: 10px 0 0; font-size: 16px; font-weight: 600; color: var(--text-muted); }
     </style>
 </head>
 
@@ -132,18 +141,18 @@
 
 <div class="form-container">
     <h1>Trim Video</h1>
-    
+
     <!-- Error message display -->
     {% if error_message %}
         <div class="availability not-available" style="display:block;">{{ error_message }}</div>
     {% endif %}
-    
-    <!-- Video availability message (AJAX) -->
+
+    <!-- Video availability / trim result message (AJAX) -->
     <div id="videoAvailability" class="availability" style="display: none;"></div>
-    
+
     <form method="post">
         {% csrf_token %}
-        
+
         <label>Select Device UID:</label>
         <select name="device_uid" required>
             <option value="">-- Select a Device UID --</option>
@@ -154,16 +163,31 @@
                 </option>
             {% endfor %}
         </select>
-        
+
         <label>Select Date:</label>
         <input type="date" name="log_date" id="log_date" required>
-        
+
+        <label>Select Video:</label>
+        <select name="video_id" id="video_id" required>
+            <option value="">
+                {% if videos %}-- Select an uploaded video --{% else %}-- No videos uploaded yet --{% endif %}
+            </option>
+            {% for video in videos %}
+                <option value="{{ video.id }}">
+                    {{ video.name }} (uploaded {{ video.uploaded }})
+                </option>
+            {% endfor %}
+        </select>
+
         <label>Game Start Time (HH:MM:SS):</label>
         <input type="text" name="game_start_time" value="00:00:00" required pattern="^([01]\d|2[0-3]):([0-5]\d):([0-5]\d)$" title="Format: HH:MM:SS">
-        
+
         <input type="submit" value="Trim Video">
     </form>
-    
+
+    <!-- Download button appears here after trimming finishes -->
+    <div id="downloadArea"></div>
+
     {% if success_message %}
     <div class="availability available" style="display:block;">
          {{ success_message }}
@@ -176,58 +200,46 @@
         </a>
     {% endif %}
 
+    <a href="/trimmed-videos" class="trimmed-button">Trimmed videos</a>
     <a href="/status-logs" class="back-button">Back</a>
     <a href="/upload-video" class="upload-button">Upload your game</a>
 </div>
 
 <!-- Trimming Progress Popup -->
 <div id="trimOverlay" style="
-    display:none;
-    position:fixed;
-    top:0; left:0;
-    width:100%; height:100%;
-    background:rgba(0,0,0,0.5);
-    z-index:9999;
-    justify-content:center;
-    align-items:center;
-">
-    <div style="
-        background:#fff;
-        padding:30px 40px;
-        border-radius:16px;
-        text-align:center;
-        box-shadow:0 25px 60px rgba(0,0,0,0.3);
-    ">
-        <h3>✂ Trimming video...</h3>
-        <p>Please wait, this may take some time.</p>
+    display:none; position:fixed; top:0; left:0; width:100%; height:100%;
+    background:rgba(0,0,0,0.5); z-index:9999; justify-content:center; align-items:center;">
+    <div style="background:#fff; padding:30px 40px; border-radius:16px; text-align:center;
+                box-shadow:0 25px 60px rgba(0,0,0,0.3); width:420px; max-width:calc(100% - 40px);">
+        <h3 style="margin:0;">✂ Trimming video...</h3>
+        <div class="progress-track"><div class="progress-bar" id="trimBar"></div></div>
+        <p class="progress-text" id="trimText">0%</p>
     </div>
 </div>
 
 
-<!-- JS: Check video availability on date/device select -->
 <script>
-
     const dateInput = document.getElementById("log_date");
     const deviceSelect = document.querySelector("select[name='device_uid']");
     const logMsgBox = document.getElementById("videoAvailability");
-    
+
     const trimForm = document.querySelector("form");
     const overlay = document.getElementById("trimOverlay");
 
-    trimForm.addEventListener("submit", () => {
-        overlay.style.display = "flex";
-    });
+    const trimBar = document.getElementById("trimBar");
+    const trimText = document.getElementById("trimText");
+    const downloadArea = document.getElementById("downloadArea");
 
-
+    // ---------- Status log availability check ----------
     function checkStatusLogs() {
         const selectedDate = dateInput.value;
         const deviceUID = deviceSelect.value;
-        
+
         if (!selectedDate || !deviceUID) {
             logMsgBox.style.display = "none";
             return;
         }
-        
+
         fetch(`/check-statuslog/?device_uid=${deviceUID}&date=${selectedDate}`)
             .then(response => {
                 if (!response.ok) {
@@ -252,10 +264,68 @@
                 logMsgBox.innerText = " Error checking availability: " + error.message;
             });
     }
-    
+
     // Trigger on change
     dateInput.addEventListener("change", checkStatusLogs);
     deviceSelect.addEventListener("change", checkStatusLogs);
+
+    // ---------- Trim progress ----------
+    function setTrimProgress(pct, msg) {
+        trimBar.style.width = pct + "%";
+        trimText.innerText = `${Math.floor(pct)}%  ${msg || ""}`;
+    }
+
+    function showTrimResult(message, ok) {
+        logMsgBox.style.display = "block";
+        logMsgBox.className = "availability " + (ok ? "available" : "not-available");
+        logMsgBox.innerText = message;
+    }
+
+    function pollTrim(jobId) {
+        const timer = setInterval(() => {
+            fetch(`{% url 'trim_progress' %}?job_id=${jobId}`)
+                .then(r => r.json())
+                .then(job => {
+                    setTrimProgress(job.percent, job.message);
+
+                    if (job.status === "done") {
+                        clearInterval(timer);
+                        overlay.style.display = "none";
+                        showTrimResult(job.message, true);
+                        downloadArea.innerHTML =
+                            `<a href="${job.download_url}" class="download-button" download>⬇ Download Trimmed Video</a>`;
+                    } else if (job.status === "error") {
+                        clearInterval(timer);
+                        overlay.style.display = "none";
+                        showTrimResult(job.message, false);
+                    }
+                })
+                .catch(() => {
+                    clearInterval(timer);
+                    overlay.style.display = "none";
+                    showTrimResult("Lost connection while checking progress.", false);
+                });
+        }, 1000);
+    }
+
+    trimForm.addEventListener("submit", function (e) {
+        e.preventDefault();
+        downloadArea.innerHTML = "";
+        logMsgBox.style.display = "none";
+        setTrimProgress(0, "Starting...");
+        overlay.style.display = "flex";
+
+        fetch("{% url 'start_trim' %}", { method: "POST", body: new FormData(trimForm) })   // FormData carries the CSRF token
+            .then(r => r.json().then(data => ({ ok: r.ok, data })))
+            .then(({ ok, data }) => {
+                if (!ok || data.error) throw new Error(data.error || "Could not start trimming.");
+                pollTrim(data.job_id);
+            })
+            .catch(err => {
+                overlay.style.display = "none";
+                showTrimResult(err.message, false);
+            });
+    });
 </script>
 
 </body>

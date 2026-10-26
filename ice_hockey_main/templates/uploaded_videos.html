@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Uploaded Videos</title>
+    <style>
+        :root {
+            --bg: #2c4c78;
+            --bg-gradient-end: #323c66;
+            --surface: #ffffff;
+            --surface-alt: #f8fafc;
+            --surface-hover: #eef2f7;
+            --border: #e8edf3;
+            --text: #1a2332;
+            --text-faint: #94a3b8;
+            --primary: #3b7dd8;
+            --primary-dark: #2c5fa8;
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 40px 24px 60px;
+            background: linear-gradient(160deg, var(--bg) 0%, var(--bg-gradient-end) 100%);
+            color: #ffffff;
+            min-height: 100vh;
+        }
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            max-width: 1500px;
+            margin: 0 auto 32px auto;
+        }
+        .page-title {
+            font-size: 35px;
+            font-weight: 700;
+            margin: 0;
+            color: #ffffff;
+            letter-spacing: -0.01em;
+            text-align: left;
+        }
+        .action-button {
+            padding: 11px 22px;
+            background-color: var(--primary);
+            color: white;
+            border-radius: 9px;
+            text-decoration: none;
+            font-size: 20px;
+            font-weight: 600;
+            box-shadow: 0 4px 14px rgba(59, 125, 216, 0.35);
+            transition: all 0.15s ease;
+        }
+        .action-button:hover { background-color: var(--primary-dark); transform: translateY(-1px); }
+
+        .table-container {
+            max-width: 1500px;
+            margin: 0 auto;
+            background: var(--surface);
+            border-radius: 16px;
+            box-shadow: 0 25px 60px rgba(0,0,0,0.3), 0 4px 12px rgba(0,0,0,0.15);
+            overflow: hidden;
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+        table { width: 100%; border-collapse: collapse; }
+        .table-header-cell {
+            padding: 17px 18px;
+            text-align: center;
+            font-size: 16px;
+            font-weight: 600;
+            background-color: var(--surface-alt);
+            color: #0864ce;
+            text-transform: uppercase;
+            letter-spacing: 0.07em;
+            border-bottom: 1px solid var(--border);
+        }
+        .table-body-cell {
+            padding: 15px 18px;
+            text-align: center;
+            font-size: 16px;
+            font-weight: 500;
+            border-bottom: 1px solid var(--border);
+            color: var(--text);
+            word-break: break-all;
+        }
+        tbody tr:hover { background-color: var(--surface-hover); }
+        tbody tr:last-child .table-body-cell { border-bottom: none; }
+
+        .link-btn {
+            display: inline-block;
+            padding: 7px 15px;
+            border-radius: 7px;
+            font-size: 15px;
+            font-weight: 600;
+            text-decoration: none;
+            margin: 0 3px;
+            color: var(--primary);
+            border: 1px solid #c9dcf5;
+            background: #fff;
+            transition: all 0.15s ease;
+        }
+        .link-btn:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+        .delete-icon-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 7px 10px;
+            margin: 0 3px;
+            border-radius: 7px;
+            color: #c0392b;
+            border: 1px solid #f3c9c9;
+            background: #fff;
+            cursor: pointer;
+            vertical-align: middle;
+            transition: all 0.15s ease;
+        }
+        .delete-icon-btn:hover { background: #c0392b; color: #fff; border-color: #c0392b; }
+        .delete-icon-btn svg { width: 18px; height: 18px; }
+
+        .empty-state { padding: 60px 20px; text-align: center; color: var(--text-faint); font-size: 16px; }
+
+        /* Confirmation popup */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.55);
+            z-index: 9999;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-box {
+            background: #fff;
+            color: var(--text);
+            padding: 28px 32px;
+            border-radius: 16px;
+            max-width: 440px;
+            width: calc(100% - 40px);
+            text-align: center;
+            box-shadow: 0 25px 60px rgba(0,0,0,0.3);
+        }
+        .modal-box h3 { margin: 0 0 10px; font-size: 22px; }
+        .modal-box p { margin: 0 0 8px; font-size: 16px; color: #5a6b80; }
+        .modal-file { font-weight: 700; color: var(--text) !important; word-break: break-all; }
+        .modal-warning { color: #c0392b !important; font-weight: 600; }
+        .modal-actions { display: flex; gap: 12px; margin-top: 22px; }
+        .modal-actions button {
+            flex: 1;
+            padding: 11px;
+            border-radius: 9px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            border: 1px solid transparent;
+        }
+        .btn-cancel { background: #fff; color: var(--text); border-color: var(--border) !important; }
+        .btn-cancel:hover { background: var(--surface-hover); }
+        .btn-confirm-delete { background: #c0392b; color: #fff; }
+        .btn-confirm-delete:hover { background: #a93226; }
+    </style>
+</head>
+<body>
+
+    <div class="page-header">
+        <h1 class="page-title">Uploaded Videos</h1>
+        <a href="/upload-video" class="action-button">Back</a>
+    </div>
+
+    <div class="table-container">
+        {% if videos %}
+        <table>
+            <thead>
+                <tr>
+                    <th class="table-header-cell">Video Name</th>
+                    <th class="table-header-cell">Uploaded On</th>
+                    <th class="table-header-cell">Size</th>
+                    <th class="table-header-cell">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for v in videos %}
+                <tr>
+                    <td class="table-body-cell">{{ v.name }}</td>
+                    <td class="table-body-cell">{{ v.uploaded }}</td>
+                    <td class="table-body-cell">{{ v.size_mb }} MB</td>
+                    <td class="table-body-cell">
+                        <a href="{{ v.url }}" target="_blank" class="link-btn">Play</a>
+                        <a href="{{ v.url }}" download class="link-btn">Download</a>
+                        <button type="button" class="delete-icon-btn"
+                                data-id="{{ v.id }}"
+                                data-label="{{ v.name }}"
+                                title="Delete video">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                 stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="3 6 5 6 21 6"></polyline>
+                                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+                                <path d="M10 11v6"></path>
+                                <path d="M14 11v6"></path>
+                                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path>
+                            </svg>
+                        </button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+            <div class="empty-state">No uploaded videos yet.</div>
+        {% endif %}
+    </div>
+
+<!-- Hidden form that performs the delete (carries the CSRF token) -->
+<form id="deleteForm" method="post" action="{% url 'delete_uploaded_video' %}" style="display:none;">
+    {% csrf_token %}
+    <input type="hidden" name="video_id" id="deleteVideoId">
+</form>
+
+<!-- Confirmation popup -->
+<div class="modal-overlay" id="deleteModal">
+    <div class="modal-box">
+        <h3>Delete this video?</h3>
+        <p class="modal-file" id="deleteLabel"></p>
+        <p class="modal-warning">This will permanently delete the uploaded video, and it can no longer be used for trimming. This cannot be undone.</p>
+        <div class="modal-actions">
+            <button type="button" class="btn-cancel" id="cancelDelete">Cancel</button>
+            <button type="button" class="btn-confirm-delete" id="confirmDelete">Yes, delete</button>
+        </div>
+    </div>
+</div>
+
+<script>
+const deleteModal   = document.getElementById("deleteModal");
+const deleteLabel   = document.getElementById("deleteLabel");
+const deleteVideoId = document.getElementById("deleteVideoId");
+const deleteForm    = document.getElementById("deleteForm");
+
+document.querySelectorAll(".delete-icon-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+        deleteVideoId.value = btn.dataset.id;
+        deleteLabel.textContent = btn.dataset.label;
+        deleteModal.style.display = "flex";
+    });
+});
+
+function closeDeleteModal() {
+    deleteModal.style.display = "none";
+    deleteVideoId.value = "";
+}
+
+document.getElementById("cancelDelete").addEventListener("click", closeDeleteModal);
+document.getElementById("confirmDelete").addEventListener("click", () => deleteForm.submit());
+
+// Click outside the box or press Esc to cancel
+deleteModal.addEventListener("click", e => { if (e.target === deleteModal) closeDeleteModal(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeDeleteModal(); });
+</script>
+</body>
+</html>

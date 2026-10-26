@@ -88,6 +88,11 @@
             background-color: var(--primary-dark);
             transform: translateY(-1px);
         }
+        input[type="submit"]:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
         .message {
             text-align: center;
             font-size: 14px;
@@ -113,6 +118,46 @@
             transition: all 0.15s ease;
         }
         .back-button:hover { background-color: var(--primary-dark); transform: translateY(-1px);}
+
+        /* Progress bar */
+        .progress-wrap { display: none; margin-top: 16px; }
+        .progress-track {
+            background: var(--border);
+            border-radius: 999px;
+            overflow: hidden;
+            height: 14px;
+        }
+        .progress-bar {
+            height: 100%;
+            width: 0;
+            background: var(--primary);
+            border-radius: 999px;
+            transition: width 0.2s ease;
+        }
+        .progress-text {
+            text-align: center;
+            margin: 8px 0 0;
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+
+        .back-button, .uploaded-button {
+        position: absolute;
+        top: 40px;
+        padding: 11px 22px;
+        background-color: var(--primary);
+        color: white;
+        border-radius: 9px;
+        text-decoration: none;
+        font-size: 20px;
+        font-weight: 600;
+        box-shadow: 0 4px 14px rgba(59, 125, 216, 0.35);
+        transition: all 0.15s ease;
+    }
+    .back-button:hover, .uploaded-button:hover { background-color: var(--primary-dark); transform: translateY(-1px); }
+    .back-button { right: 20px; }
+    .uploaded-button { right: 130px; }
     </style>
 </head>
 
@@ -122,15 +167,17 @@
         <h1>Upload Video</h1>
 
         <!-- Success and Error Messages -->
-        {% if messages %}
-            {% for message in messages %}
-                <div class="message {{ message.tags }}">
-                    {{ message }}
-                </div>
-            {% endfor %}
-        {% endif %}
+        <div id="messageBox">
+            {% if messages %}
+                {% for message in messages %}
+                    <div class="message {{ message.tags }}">
+                        {{ message }}
+                    </div>
+                {% endfor %}
+            {% endif %}
+        </div>
 
-        <form method="post" enctype="multipart/form-data">
+        <form method="post" enctype="multipart/form-data" id="uploadForm">
             {% csrf_token %}
 
             <!-- Video Upload -->
@@ -139,17 +186,100 @@
                 <input type="file" name="video_file" id="video_file" required>
             </div>
 
-            <!-- Select Date -->
-            <div class="form-group">
-                <label for="log_date">Select Date:</label>
-                <input type="date" name="log_date" id="log_date" required>
-            </div>
+            <input type="submit" value="Upload Video" id="uploadBtn">
 
-            <input type="submit" value="Upload Video">
+            <!-- Progress bar -->
+            <div class="progress-wrap" id="progressWrap">
+                <div class="progress-track">
+                    <div class="progress-bar" id="progressBar"></div>
+                </div>
+                <p class="progress-text" id="progressText">0%</p>
+            </div>
         </form>
     </div>
-
+    <a href="/uploaded-videos" class="uploaded-button">Uploaded videos</a>
     <a href="/trim-video" class="back-button">Back</a>
+
+<script>
+    const uploadForm   = document.getElementById("uploadForm");
+    const uploadBtn    = document.getElementById("uploadBtn");
+    const progressWrap = document.getElementById("progressWrap");
+    const progressBar  = document.getElementById("progressBar");
+    const progressText = document.getElementById("progressText");
+    const messageBox   = document.getElementById("messageBox");
+
+    function showMessage(text, type) {
+        messageBox.innerHTML = `<div class="message ${type}">${text}</div>`;
+    }
+
+    function resetUploadUI() {
+        uploadBtn.disabled = false;
+        uploadBtn.value = "Upload Video";
+        progressWrap.style.display = "none";
+        progressBar.style.width = "0";
+    }
+
+    uploadForm.addEventListener("submit", function (e) {
+        e.preventDefault();
+
+        uploadBtn.disabled = true;
+        uploadBtn.value = "Uploading...";
+        messageBox.innerHTML = "";
+        progressWrap.style.display = "block";
+        progressBar.style.width = "0";
+        progressText.innerText = "0%";
+
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", window.location.href);
+
+        // Real upload progress, 0 to 100%
+        xhr.upload.onprogress = function (ev) {
+            if (!ev.lengthComputable) return;
+            const pct      = Math.round((ev.loaded / ev.total) * 100);
+            const loadedMB = (ev.loaded / 1048576).toFixed(1);
+            const totalMB  = (ev.total / 1048576).toFixed(1);
+            progressBar.style.width = pct + "%";
+            progressText.innerText = pct < 100
+                ? `${pct}%  (${loadedMB} / ${totalMB} MB)`
+                : "100%  Saving on server, please wait...";
+        };
+
+        xhr.onload = function () {
+            if (xhr.status >= 400) {
+                resetUploadUI();
+                showMessage("Upload failed (server error " + xhr.status + "). Please try again.", "error");
+                return;
+            }
+
+            // Django redirects back to this page; read the success/error message from it
+            const doc = new DOMParser().parseFromString(xhr.responseText, "text/html");
+            const newMessages = doc.getElementById("messageBox");
+            messageBox.innerHTML = newMessages ? newMessages.innerHTML : "";
+
+            // Redirect only if the server reported a successful upload
+            const uploadedOk = messageBox.querySelector(".message.success") !== null;
+
+            if (uploadedOk) {
+                progressText.innerText = "100%  Upload complete. Redirecting to Trim Video...";
+                setTimeout(function () {
+                    window.location.href = "{% url 'trim_video' %}";
+                }, 1500);
+                return;   // keep the button disabled so the video can't be uploaded twice
+            }
+
+            // Duplicate name or other error: stay on this page
+            resetUploadUI();
+            uploadForm.reset();
+        };
+
+        xhr.onerror = function () {
+            resetUploadUI();
+            showMessage("Upload failed. Please check your connection and try again.", "error");
+        };
+
+        xhr.send(new FormData(uploadForm));   // FormData includes the CSRF token
+    });
+</script>
 
 </body>
 </html>

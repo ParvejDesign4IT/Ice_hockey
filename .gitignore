@@ -1,0 +1,7 @@
+ice_hockey_main/media/
+ice_hockey_main/db.sqlite3
+__MACOSX/
+*.mp4
+*.mov
+__pycache__/
+*.pyc

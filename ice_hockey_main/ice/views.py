@@ -22,6 +22,13 @@ from moviepy.video.io.VideoFileClip import VideoFileClip
 
 from .models import Read, StatusLog, Transmitter, CommonVideo, DeviceLabel
 from .serializers import TransmitterSerializer
+from django.utils.text import get_valid_filename
+from django.views.decorators.http import require_POST
+import threading
+import uuid
+import shutil
+import time as time_module   # not "import time": your file already uses datetime's `time`
+
 
 
 DEVICE_CACHE = {}
@@ -329,9 +336,8 @@ def delete_read(request, device_uid):
 # ---------------------------------------------------------------------------
 # Video trimming
 # ---------------------------------------------------------------------------
-
 def trim_video(request):
-    cleanup_expired_videos()   # NEW: remove any videos from past dates first 
+    cleanup_expired_videos()
 
     distinct_uids = StatusLog.objects.values_list("deviceUID", flat=True).distinct()
     label_map = dict(DeviceLabel.objects.values_list('deviceUID', 'label'))
@@ -344,14 +350,31 @@ def trim_video(request):
         key=lambda d: _sort_key(d["label"])
     )
 
+    # Uploaded videos for the "Select Video" dropdown (newest first)
+    videos = [
+        {
+            "id": v.id,
+            "name": os.path.basename(v.video_file.name),
+            "uploaded": v.log_date,
+        }
+        for v in CommonVideo.objects.order_by("-id")
+        if v.video_file
+    ]
+
+    base_context = {
+        "distinct_device_count": distinct_device_count,
+        "videos": videos,
+    }
+
     if request.method == "POST":
         device_uid = request.POST.get("device_uid")
         log_date = request.POST.get("log_date")
         game_start_time = request.POST.get("game_start_time")
+        video_id = request.POST.get("video_id")
 
-        if not (device_uid and log_date and game_start_time):
+        if not (device_uid and log_date and game_start_time and video_id):
             return render(request, "trim_video.html", {
-                "distinct_device_count": distinct_device_count,
+                **base_context,
                 "error_message": "All fields are required."
             })
 
@@ -367,15 +390,16 @@ def trim_video(request):
 
         if not logs.exists():
             return render(request, "trim_video.html", {
-                "distinct_device_count": distinct_device_count,
+                **base_context,
                 "error_message": "No Active/Inactive logs after game start time."
             })
 
-        video_obj = CommonVideo.objects.filter(log_date=selected_date).order_by("id").first()
-        if not video_obj or not video_obj.video_file:
+        # Use the video the user selected (no date matching)
+        video_obj = CommonVideo.objects.filter(id=video_id).first() if str(video_id).isdigit() else None
+        if not video_obj or not video_obj.video_file or not os.path.exists(video_obj.video_file.path):
             return render(request, "trim_video.html", {
-                "distinct_device_count": distinct_device_count,
-                "error_message": f"No uploaded video found for {selected_date}."
+                **base_context,
+                "error_message": "Selected video was not found. It may have been deleted. Please choose another video."
             })
 
         video_path = video_obj.video_file.path
@@ -445,7 +469,7 @@ def trim_video(request):
 
         if not segment_files:
             return render(request, "trim_video.html", {
-                "distinct_device_count": distinct_device_count,
+                **base_context,
                 "error_message": "No valid Active → Inactive segments found."
             })
 
@@ -475,7 +499,7 @@ def trim_video(request):
                 os.remove(f)
 
         return render(request, "trim_video.html", {
-            "distinct_device_count": distinct_device_count,
+            **base_context,
             "download_url": settings.MEDIA_URL + output_name,
             "success_message": (
                 "No inactive logs found after game start time."
@@ -484,12 +508,12 @@ def trim_video(request):
             )
         })
 
-    return render(request, "trim_video.html", {"distinct_device_count": distinct_device_count})
+    return render(request, "trim_video.html", base_context)
 
 
 def check_statuslog(request):
     """
-    AJAX view to check if StatusLog and CommonVideo are available for the selected UID and date.
+    AJAX view to check if StatusLog entries exist for the selected UID and date.
     """
     device_uid = request.GET.get('device_uid')
     date_str = request.GET.get('date')
@@ -499,27 +523,54 @@ def check_statuslog(request):
 
     try:
         selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        log_count = StatusLog.objects.filter(
+            deviceUID=device_uid, timestamp__date=selected_date
+        ).count()
 
-        status_logs = StatusLog.objects.filter(deviceUID=device_uid, timestamp__date=selected_date)
-        logs_exist = status_logs.exists()
-        log_count = status_logs.count()
+        if log_count == 0:
+            return JsonResponse({'available': False, 'message': 'No status logs found for the selected device and date.'})
 
-        video_exist = CommonVideo.objects.filter(log_date=selected_date).exists()
+        if log_count % 2 != 0:
+            return JsonResponse({'available': False, 'message': f'Status logs ({log_count} entries) available, but uneven number (need IN-OUT pairs).'})
 
-        if logs_exist and video_exist:
-            if log_count % 2 == 0:
-                return JsonResponse({'available': True, 'message': f'Status logs ({log_count} entries) and video available for the selected device and date.'})
-            else:
-                return JsonResponse({'available': False, 'message': f'Status logs ({log_count} entries) available, but uneven number (need IN-OUT pairs). Video found.'})
-        elif logs_exist:
-            return JsonResponse({'available': False, 'message': f'Status logs ({log_count} entries) available, but no video found for the selected date.'})
-        elif video_exist:
-            return JsonResponse({'available': False, 'message': 'Video available, but no status logs found for the selected device and date.'})
-        else:
-            return JsonResponse({'available': False, 'message': 'No status logs or video found for the selected device and date.'})
+        return JsonResponse({'available': True, 'message': f'Status logs ({log_count} entries) available for the selected device and date.'})
 
     except ValueError:
         return JsonResponse({'available': False, 'message': 'Invalid date format.'})
+
+
+def trimmed_videos(request):
+    """Lists all trimmed videos in MEDIA_ROOT, newest first."""
+    label_map = dict(DeviceLabel.objects.values_list('deviceUID', 'label'))
+    videos = []
+
+    if os.path.isdir(settings.MEDIA_ROOT):
+        for filename in os.listdir(settings.MEDIA_ROOT):
+            if not (filename.startswith("trimmed_") and filename.lower().endswith(".mp4")):
+                continue
+
+            path = os.path.join(settings.MEDIA_ROOT, filename)
+            if not os.path.isfile(path):
+                continue
+
+            # filename format: trimmed_<deviceUID>_<YYYY-MM-DD>.mp4
+            stem = filename[len("trimmed_"):-len(".mp4")]
+            device_uid, _, game_date = stem.rpartition("_")
+
+            modified = os.path.getmtime(path)
+            videos.append({
+                "name": filename,
+                "url": settings.MEDIA_URL + filename,
+                "player": label_map.get(device_uid, device_uid),
+                "game_date": game_date,
+                "created": datetime.fromtimestamp(modified, tz=timezone.get_current_timezone()),
+                "size_mb": round(os.path.getsize(path) / (1024 * 1024), 1),
+                "_ts": modified,
+            })
+
+    videos.sort(key=lambda v: v["_ts"], reverse=True)   # latest first
+    return render(request, "trimmed_videos.html", {"videos": videos})
+
 
 def cleanup_expired_videos():
     """
@@ -534,31 +585,51 @@ def cleanup_expired_videos():
             os.remove(video.video_file.path)
         video.delete()
 
+@require_POST
+def delete_trimmed_video(request):
+    """Deletes one trimmed video file from MEDIA_ROOT."""
+    # basename() blocks path tricks like ../../something
+    filename = os.path.basename(request.POST.get("filename", ""))
 
+    # Only allow files created by trim_video
+    if filename.startswith("trimmed_") and filename.lower().endswith(".mp4"):
+        path = os.path.join(settings.MEDIA_ROOT, filename)
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass   # e.g. file is in use; the list will simply still show it
+
+    return redirect("trimmed_videos")
 
 def upload_video(request):
-    cleanup_expired_videos()   # NEW: remove any videos from past dates first
+    cleanup_expired_videos()
 
     if request.method == "POST":
         video_file = request.FILES.get("video_file")
-        log_date = request.POST.get("log_date")
 
-        if not video_file or not log_date:
-            messages.error(request, "Please select a valid video file and date.")
+        if not video_file:
+            messages.error(request, "Please select a valid video file.")
+            return redirect("upload_video")
+
+        # Django cleans file names (e.g. spaces become underscores) before saving,
+        # so compare using the same cleaned name that would be stored in the DB.
+        stored_name = f"videos/{get_valid_filename(video_file.name)}"
+
+        if CommonVideo.objects.filter(video_file__iexact=stored_name).exists():
+            messages.error(
+                request,
+                f"A video named '{video_file.name}' already exists. "
+                "Please rename your video and upload it again."
+            )
             return redirect("upload_video")
 
         try:
-            existing_video = CommonVideo.objects.filter(log_date=log_date).first()
-
-            if existing_video:
-                if existing_video.video_file and os.path.exists(existing_video.video_file.path):
-                    os.remove(existing_video.video_file.path)
-                existing_video.video_file = video_file
-                existing_video.save()
-                messages.success(request, f"Video for {log_date} replaced successfully.")
-            else:
-                CommonVideo.objects.create(video_file=video_file, log_date=log_date)
-                messages.success(request, f"New video uploaded successfully for {log_date}.")
+            CommonVideo.objects.create(
+                video_file=video_file,
+                log_date=timezone.localdate()   # upload date, used only for the 7-day cleanup
+            )
+            messages.success(request, "Video uploaded successfully.")
 
         except Exception as e:
             messages.error(request, f"Upload failed: {str(e)}")
@@ -624,3 +695,235 @@ def check_statuslog_availability(request):
 
     except Exception as e:
         return JsonResponse({'available': False, 'message': f'Error: {str(e)}'})
+
+
+TRIM_JOBS = {}   # job_id -> progress info (in memory)
+
+
+def _prune_trim_jobs():
+    """Drop finished jobs older than 1 hour so the dict doesn't grow forever."""
+    cutoff = time_module.time() - 3600
+    for jid in [j for j, v in TRIM_JOBS.items()
+                if v["created"] < cutoff and v["status"] != "running"]:
+        TRIM_JOBS.pop(jid, None)
+
+
+def _run_trim_job(job_id, video_path, segments, output_name, fallback_used):
+    """Runs in a background thread. Does ffmpeg work only, no database access."""
+    job = TRIM_JOBS[job_id]
+    temp_dir = os.path.join(settings.MEDIA_ROOT, "temp", job_id)   # separate folder per job
+    os.makedirs(temp_dir, exist_ok=True)
+
+    total = sum(d for _, d in segments) or 1
+    done = 0.0
+    segment_files = []
+
+    try:
+        for i, (start_offset, duration) in enumerate(segments):
+            seg_path = os.path.join(temp_dir, f"segment_{i}.mp4")
+            job["message"] = f"Cutting segment {i + 1} of {len(segments)}..."
+
+            proc = subprocess.Popen(
+                [
+                    settings.FFMPEG_BINARY, "-y",
+                    "-ss", str(start_offset),
+                    "-i", video_path,
+                    "-t", str(duration),
+                    "-c:v", "libx264",
+                    "-c:a", "aac",
+                    "-preset", "veryfast",
+                    "-movflags", "+faststart",
+                    "-progress", "pipe:1", "-nostats",
+                    seg_path
+                ],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+            )
+
+            for line in proc.stdout:
+                if line.startswith("out_time_ms="):
+                    try:
+                        current = int(line.split("=")[1]) / 1_000_000   # microseconds -> seconds
+                    except ValueError:
+                        continue
+                    current = min(max(current, 0), duration)
+                    job["percent"] = round((done + current) / total * 95, 1)
+
+            proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError("ffmpeg failed while cutting a segment.")
+
+            done += duration
+            segment_files.append(seg_path)
+
+        # Merge step (95% -> 100%)
+        job["message"] = "Merging segments..."
+        job["percent"] = 96
+
+        concat_file = os.path.join(temp_dir, "concat.txt")
+        with open(concat_file, "w", encoding="utf-8") as f:
+            for seg in segment_files:
+                f.write(f"file '{seg.replace(chr(92), '/')}'\n")
+
+        output_path = os.path.join(settings.MEDIA_ROOT, output_name)
+        subprocess.run(
+            [
+                settings.FFMPEG_BINARY, "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", concat_file,
+                "-c", "copy",
+                output_path
+            ],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
+        job.update(
+            percent=100,
+            status="done",
+            download_url=settings.MEDIA_URL + output_name,
+            message=("No inactive logs found after game start time."
+                     if fallback_used else "Video trimmed and merged successfully!")
+        )
+
+    except Exception as e:
+        job.update(status="error", message=f"Trimming failed: {e}")
+
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@require_POST
+def start_trim(request):
+    """Validates the form, builds the cut list, then starts the background job."""
+    cleanup_expired_videos()
+    _prune_trim_jobs()
+
+    device_uid = request.POST.get("device_uid")
+    log_date = request.POST.get("log_date")
+    game_start_time = request.POST.get("game_start_time")
+    video_id = request.POST.get("video_id")
+
+    if not (device_uid and log_date and game_start_time and video_id):
+        return JsonResponse({"error": "All fields are required."}, status=400)
+
+    try:
+        naive_game_start = datetime.strptime(f"{log_date} {game_start_time}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return JsonResponse({"error": "Invalid date or time format."}, status=400)
+
+    game_start_dt = timezone.make_aware(naive_game_start, timezone.get_current_timezone())
+    selected_date = naive_game_start.date()
+
+    logs = list(StatusLog.objects.filter(
+        deviceUID=device_uid,
+        timestamp__date=selected_date,
+        timestamp__gte=game_start_dt
+    ).order_by("timestamp"))
+
+    if not logs:
+        return JsonResponse({"error": "No Active/Inactive logs after game start time."}, status=400)
+
+    video_obj = CommonVideo.objects.filter(id=video_id).first() if str(video_id).isdigit() else None
+    if not video_obj or not video_obj.video_file or not os.path.exists(video_obj.video_file.path):
+        return JsonResponse(
+            {"error": "Selected video was not found. It may have been deleted. Please choose another video."},
+            status=400
+        )
+    video_path = video_obj.video_file.path
+
+    # Build the list of (start_offset, duration) cuts, same logic as before
+    segments = []
+    active_start = None
+    for log in logs:
+        if log.status == "In":
+            active_start = log.timestamp
+        elif log.status == "Out" and active_start:
+            start_offset = (active_start - game_start_dt).total_seconds()
+            duration = (log.timestamp - active_start).total_seconds() + 1
+            if duration > 0:
+                segments.append((start_offset, duration))
+            active_start = None
+
+    fallback_used = False
+    if active_start:
+        clip = VideoFileClip(video_path)
+        video_duration = clip.duration
+        clip.close()
+        start_offset = (active_start - game_start_dt).total_seconds()
+        remaining = max(video_duration - start_offset, 0)
+        if remaining > 0:
+            segments.append((start_offset, remaining))
+            fallback_used = True
+
+    if not segments:
+        return JsonResponse({"error": "No valid Active → Inactive segments found."}, status=400)
+
+    job_id = uuid.uuid4().hex
+    TRIM_JOBS[job_id] = {
+        "percent": 0,
+        "status": "running",
+        "message": "Starting...",
+        "download_url": "",
+        "created": time_module.time(),
+    }
+
+    output_name = f"trimmed_{device_uid}_{selected_date}.mp4"
+    threading.Thread(
+        target=_run_trim_job,
+        args=(job_id, video_path, segments, output_name, fallback_used),
+        daemon=True
+    ).start()
+
+    return JsonResponse({"job_id": job_id})
+
+
+def trim_progress(request):
+    job = TRIM_JOBS.get(request.GET.get("job_id", ""))
+    if not job:
+        return JsonResponse({"status": "error", "message": "Trim job not found."}, status=404)
+    return JsonResponse({
+        "percent": job["percent"],
+        "status": job["status"],
+        "message": job["message"],
+        "download_url": job["download_url"],
+    })
+
+def uploaded_videos(request):
+    """Lists all uploaded videos, newest first."""
+    cleanup_expired_videos()
+
+    videos = []
+    for v in CommonVideo.objects.order_by("-id"):
+        if not v.video_file:
+            continue
+        try:
+            size_mb = round(v.video_file.size / (1024 * 1024), 1)
+        except OSError:
+            continue   # file is missing from disk, so skip it
+
+        videos.append({
+            "id": v.id,
+            "name": os.path.basename(v.video_file.name),
+            "url": v.video_file.url,
+            "uploaded": v.log_date,
+            "size_mb": size_mb,
+        })
+
+    return render(request, "uploaded_videos.html", {"videos": videos})
+
+
+@require_POST
+def delete_uploaded_video(request):
+    """Deletes one uploaded video (database record and file)."""
+    video_id = request.POST.get("video_id", "")
+    video = CommonVideo.objects.filter(id=video_id).first() if video_id.isdigit() else None
+
+    if video:
+        try:
+            if video.video_file and os.path.exists(video.video_file.path):
+                os.remove(video.video_file.path)
+        except OSError:
+            pass   # file in use; the record is still removed below
+        video.delete()
+
+    return redirect("uploaded_videos")
+

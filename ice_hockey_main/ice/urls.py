@@ -24,8 +24,12 @@ urlpatterns = [
     path('trim-video/', views.trim_video, name='trim_video'),
     path('check-statuslog/', views.check_statuslog, name='check_statuslog'),
     path('upload-video/', views.upload_video, name='upload_video'),
-    path('check-video/', views.check_video_availability, name='check_video'),
-
+    path('trimmed-videos/', views.trimmed_videos, name='trimmed_videos'),
+    path('delete-trimmed/', views.delete_trimmed_video, name='delete_trimmed_video'),
+    path('trim-video/start/', views.start_trim, name='start_trim'),
+    path('trim-video/progress/', views.trim_progress, name='trim_progress'),
+    path('uploaded-videos/', views.uploaded_videos, name='uploaded_videos'),
+    path('delete-uploaded/', views.delete_uploaded_video, name='delete_uploaded_video'), 
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 
 handler404 = 'ice.views.custom_404_view'
